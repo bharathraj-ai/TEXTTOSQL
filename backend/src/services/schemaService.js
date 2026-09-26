@@ -33,6 +33,8 @@ async function getDatabaseSchema(forceRefresh = false, targetPool = null, userId
   if (targetPool && typeof targetPool.discoverSchema === 'function') {
     console.log(`[SCHEMA] Discovering database schema via adapter for [${cacheKey}]...`);
     const schema = await targetPool.discoverSchema();
+    if (!schema.tables) schema.tables = {};
+    if (!schema.relationships) schema.relationships = [];
     schemaCache.set(cacheKey, schema);
     const tableNames = Object.keys(schema.tables);
     console.log(`[SCHEMA] Discovered ${tableNames.length} tables/collections for [${cacheKey}]: ${tableNames.join(', ')}`);

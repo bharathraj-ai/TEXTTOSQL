@@ -40,7 +40,18 @@ export default function QueryHistory({ onSelectQuery }) {
     ? history.filter((item) => favorites.includes(item.question))
     : history;
 
-  const finalList = isExpanded ? displayList : displayList.slice(0, 5);
+  const finalList = isExpanded ? displayList : displayList.slice(0, 8);
+
+  const groups = [];
+  for (const item of finalList) {
+    const label = dayLabel(item.timestamp);
+    const last = groups[groups.length - 1];
+    if (!last || last.label !== label) {
+      groups.push({ label, items: [item] });
+    } else {
+      last.items.push(item);
+    }
+  }
 
   return (
     <section className="query-history-section">
@@ -79,22 +90,28 @@ export default function QueryHistory({ onSelectQuery }) {
         </div>
       </div>
       <div className="history-list">
-        {finalList.map((item, i) => (
-          <div key={`${item.question}-${i}`} className="history-item-row">
+        {groups.map((group) => (
+          <div key={group.label} className="history-day-group">
+            <div className="history-day-label">{group.label}</div>
+            {group.items.map((item, i) => (
+          <div key={`${item.question}-${item.timestamp || i}`} className="history-item-row">
             <button
               className="history-item"
               onClick={() => onSelectQuery(item.question)}
             >
-              <span className="history-number">{i + 1}.</span>
               <span className="history-question">{item.question}</span>
+              {item.operation && (
+                <span className="history-op">{item.operation}</span>
+              )}
+              {item.timestamp && (
+                <span className="history-time">{formatTime(item.timestamp)}</span>
+              )}
               {item.executionTime && (
                 <span className="history-time">{item.executionTime}ms</span>
               )}
-              {item.success !== undefined && (
-                <span className={`history-status ${item.success ? 'success' : 'failed'}`}>
-                  {item.success ? '✓' : '✗'}
-                </span>
-              )}
+              <span className={`history-status ${item.success ? 'success' : 'failed'}`}>
+                {item.status || (item.success ? 'success' : 'failed')}
+              </span>
             </button>
             <button
               className={`favorite-btn ${favorites.includes(item.question) ? 'favorited' : ''}`}
@@ -107,6 +124,8 @@ export default function QueryHistory({ onSelectQuery }) {
               {favorites.includes(item.question) ? '★' : '☆'}
             </button>
           </div>
+            ))}
+          </div>
         ))}
       </div>
     </section>
@@ -117,20 +136,40 @@ export default function QueryHistory({ onSelectQuery }) {
  * Save a query to localStorage history.
  * Called from App.jsx after each query execution.
  */
-export function saveToHistory(question, success, sql = '', executionTime = null) {
+function dayLabel(timestamp) {
+  if (!timestamp) return 'Earlier';
+  const d = new Date(timestamp);
+  const today = new Date();
+  const startToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const startItem = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diff = Math.round((startToday - startItem) / 86400000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  return d.toLocaleDateString();
+}
+
+function formatTime(timestamp) {
+  try {
+    return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+}
+
+export function saveToHistory(question, success, sql = '', executionTime = null, meta = {}) {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     let history = stored ? JSON.parse(stored) : [];
 
-    // Remove duplicate if exists
     history = history.filter((h) => h.question !== question);
 
-    // Add to front
     history.unshift({
       question,
       success,
       sql,
       executionTime,
+      operation: meta.operation || '',
+      status: meta.status || (success ? 'success' : 'failed'),
       timestamp: Date.now(),
     });
 

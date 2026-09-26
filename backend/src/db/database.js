@@ -4,6 +4,7 @@
 // Uses a connection pool for efficient PostgreSQL access.
 // Reads DATABASE_URL from .env — never hardcode credentials.
 
+require('dotenv').config();
 const { Pool } = require('pg');
 
 function formatDbError(err) {

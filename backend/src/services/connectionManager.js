@@ -184,16 +184,19 @@ async function setUserConnection(userId, connectionName, rawUrl) {
     [uid]
   );
 
+  let connectionId;
   if (existingConn.rows.length > 0) {
+    connectionId = existingConn.rows[0].id;
     await appPool.query(
       'UPDATE database_connections SET connection_name = $1, encrypted_url = $2, created_at = CURRENT_TIMESTAMP WHERE id = $3',
-      [connName, encryptedUrl, existingConn.rows[0].id]
+      [connName, encryptedUrl, connectionId]
     );
   } else {
-    await appPool.query(
-      'INSERT INTO database_connections (user_id, connection_name, encrypted_url) VALUES ($1, $2, $3)',
+    const inserted = await appPool.query(
+      'INSERT INTO database_connections (user_id, connection_name, encrypted_url) VALUES ($1, $2, $3) RETURNING id',
       [uid, connName, encryptedUrl]
     );
+    connectionId = inserted.rows[0].id;
   }
 
   // 5. Instantiate and cache new active adapter
@@ -217,6 +220,7 @@ async function setUserConnection(userId, connectionName, rawUrl) {
     name: testInfo.name,
     tableCount: testInfo.tableCount,
     tables: testInfo.tables,
+    connectionId,
   };
 }
 
@@ -264,7 +268,7 @@ async function getUserStatus(userId) {
   const uid = Number(userId);
 
   const res = await appPool.query(
-    'SELECT connection_name, encrypted_url, created_at FROM database_connections WHERE user_id = $1 ORDER BY id DESC LIMIT 1',
+    'SELECT id, connection_name, encrypted_url, created_at FROM database_connections WHERE user_id = $1 ORDER BY id DESC LIMIT 1',
     [uid]
   );
 
@@ -303,6 +307,7 @@ async function getUserStatus(userId) {
       dbType: details.dbType,
       tableCount: tables.length,
       tables,
+      connectionId: row.id,
       createdAt: row.created_at,
     };
   } catch (err) {
@@ -314,6 +319,37 @@ async function getUserStatus(userId) {
   }
 }
 
+/**
+ * Confirm the signed-in user owns the saved connection, then return its adapter.
+ * A missing connectionId uses that user's latest saved connection.
+ */
+async function assertUserConnection(userId, connectionId = null) {
+  const uid = Number(userId);
+  if (!uid) {
+    const err = new Error('Authentication required.');
+    err.statusCode = 401;
+    throw err;
+  }
+
+  const params = [uid];
+  let sql = 'SELECT id FROM database_connections WHERE user_id = $1';
+  if (connectionId !== null && connectionId !== undefined && connectionId !== '') {
+    sql += ' AND id = $2';
+    params.push(Number(connectionId));
+  }
+  sql += ' ORDER BY id DESC LIMIT 1';
+
+  const res = await appPool.query(sql, params);
+  if (res.rows.length === 0) {
+    const err = new Error('Database connection was not found for this account.');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const adapter = await getUserAdapter(uid);
+  return { adapter, connectionId: res.rows[0].id };
+}
+
 module.exports = {
   testRawConnection,
   getUserAdapter,
@@ -323,4 +359,5 @@ module.exports = {
   cleanupUserSession,
   getUserStatus,
   parseDatabaseDetails,
+  assertUserConnection,
 };

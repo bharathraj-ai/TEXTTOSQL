@@ -8,7 +8,7 @@
 // 4. Intent Classification & Ambiguity Detection
 // 5. Query Planning (Formal plan & confidence scoring)
 // 6. User-Isolated Query Caching Check
-// 7. Local Offline SQL / MQL Generation
+// 7. Local rule-based SQL / MQL generation (not a trained model)
 // 8. 3-Layer Validation (Syntax, Schema, Security)
 // 9. Conservative EXPLAIN / Cost Check
 // 10. Execution with 5-Second Timeout & 100-Row Limit
@@ -18,7 +18,8 @@
 // 14. Concise Numbered Explanation Generation
 // 15. Audit Logging (Zero Credentials Stored)
 //
-// 100% Local & Offline — Zero External AI APIs.
+// Read queries use the local rule engine, then optional OpenRouter review.
+// Conversation is handled by Groq and never touches the database.
 
 const { getDatabaseSchema, getRelevantSchema } = require('./schemaService');
 const { generateSQL, correctSQL, generateExplanation, generateSuggestions } = require('./llmService');
@@ -30,6 +31,22 @@ const { createQueryPlan } = require('./queryPlanner');
 const { logQuery } = require('./auditService');
 const { getCachedQuery, setCachedQuery } = require('./queryCache');
 const { reviewSQL } = require('./sqlReviewService');
+const { classifyQuery, QUERY_CATEGORIES } = require('./queryClassifier');
+const { handleConversation } = require('./groqService');
+const { stageNaturalLanguageOperation } = require('./operationPipeline');
+const { assertUserConnection } = require('./connectionManager');
+
+function stripVendorPrefix(text) {
+  return String(text || '').replace(/^@vendor\s+/i, '').trim();
+}
+
+function withCurrentTable(question, currentTable, schema) {
+  const names = Object.keys(schema?.tables || {});
+  const real = names.find((name) => name.toLowerCase() === String(currentTable || '').toLowerCase());
+  if (!real) return question;
+  const mentioned = names.some((name) => new RegExp(`\\b${name}\\b`, 'i').test(question));
+  return mentioned ? question : `${question} from ${real}`;
+}
 
 // Maximum correction attempts before giving up
 const MAX_CORRECTION_ATTEMPTS = 2;
@@ -153,7 +170,7 @@ async function checkQueryCost(sql, adapter, dbType) {
  * @param {number|string} [userId] - Authenticated user ID
  * @returns {Promise<object>} - Structured response object
  */
-async function processNaturalLanguageQuery(question, userId = null) {
+async function processNaturalLanguageQuery(question, userId = null, options = {}) {
   const startTime = Date.now();
 
   // ── 1. Validate question ────────────────────────────
@@ -165,9 +182,47 @@ async function processNaturalLanguageQuery(question, userId = null) {
     };
   }
 
-  const trimmedQuestion = question.trim();
+  const trimmedQuestion = stripVendorPrefix(question.trim());
   console.log(`\n${'═'.repeat(50)}`);
   console.log(`[QUERY] User: ${userId || 'guest'} | Question: "${trimmedQuestion}"`);
+
+  // ── 1b. Classify before any database or SQL work ──
+  const classification = classifyQuery(trimmedQuestion);
+  console.log(`[CLASSIFY] ${classification.category} (${classification.confidence})`);
+
+  if (classification.category === QUERY_CATEGORIES.CONVERSATION) {
+    const convo = await handleConversation(trimmedQuestion);
+    return {
+      success: true,
+      type: 'conversation',
+      category: QUERY_CATEGORIES.CONVERSATION,
+      question: trimmedQuestion,
+      message: convo.message,
+      source: convo.source,
+      model: convo.model || null,
+      sql: null,
+    };
+  }
+
+  if (
+    classification.category === QUERY_CATEGORIES.DATABASE_MODIFICATION ||
+    classification.category === QUERY_CATEGORIES.DDL
+  ) {
+    return stageNaturalLanguageOperation(trimmedQuestion, userId, options);
+  }
+
+  if (userId && options.connectionId) {
+    try {
+      await assertUserConnection(userId, options.connectionId);
+    } catch (err) {
+      return {
+        success: false,
+        statusCode: err.statusCode || 403,
+        type: 'query_error',
+        error: err.message,
+      };
+    }
+  }
 
   // ── 2. Resolve user database adapter ───────────────
   let adapter;
@@ -299,10 +354,10 @@ async function processNaturalLanguageQuery(question, userId = null) {
     };
   }
 
-  // ── 8. Generate Query (local offline SLM) ───────────
+  // ── 8. Generate Query (local rule-based engine) ─────
   let sql;
   try {
-    sql = generateSQL(trimmedQuestion, relevantSchema, intentResult.intents, dbType);
+    sql = generateSQL(withCurrentTable(trimmedQuestion, options.currentTable, fullSchema), relevantSchema, intentResult.intents, dbType);
   } catch (err) {
     console.error('[SQL] Generation error:', err.message);
     logQuery({
@@ -506,6 +561,7 @@ async function processNaturalLanguageQuery(question, userId = null) {
   const responsePayload = {
     success: true,
     type: 'query_result',
+    category: QUERY_CATEGORIES.DATABASE_QUERY,
     question: trimmedQuestion,
     sql: currentSQL,
     dbType,

@@ -1,5 +1,6 @@
 // ============================================
-// LLM Service — Schema-Agnostic Local SLM Engine
+// LLM Service — Schema-agnostic rule-based SQL engine
+// This is pattern and template generation, not a trained local model.
 // ============================================
 // Day 3: A fully local, zero-API SQL generation engine
 // that works with ANY PostgreSQL schema. No hardcoded
@@ -592,6 +593,11 @@ function buildDynamicSQL(q, schema, entities, intents, dbType = 'postgres') {
         return `SELECT * FROM ${qTable} WHERE ${dateExpr} LIMIT 100;`;
       }
     }
+  }
+
+  // ── Detected sort with no filter (largest, highest, recent) ─
+  if (entities.sortDirection && entities.sortColumn) {
+    return `SELECT * FROM ${qTable} ORDER BY ${formatIdentifier(entities.sortColumn, dbType)} ${entities.sortDirection} LIMIT ${entities.limit || 100};`;
   }
 
   // ── Default: SELECT ALL ─────────────────────────────

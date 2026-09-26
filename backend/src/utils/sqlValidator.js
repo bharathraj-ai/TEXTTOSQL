@@ -468,6 +468,9 @@ function validateQuery(query, schema = null, dbType = 'postgres', mode = 'read')
   if (mode === 'write') {
     return validateQueryWrite(query, schema, dbType);
   }
+  if (mode === 'ddl') {
+    return validateQueryDDL(query, schema, dbType);
+  }
 
   // Layer 1: Syntax
   const syntaxCheck = validateSyntax(query, dbType);
@@ -573,6 +576,76 @@ function validateQueryWrite(query, schema, dbType) {
   return { valid: true };
 }
 
+const ALLOWED_DDL_OPS = new Set(['CREATE', 'ALTER', 'DROP', 'TRUNCATE']);
+
+/**
+ * DDL-mode validation: allows CREATE, ALTER, DROP, TRUNCATE with strict safety checks.
+ */
+function validateQueryDDL(query, schema, dbType = 'postgres') {
+  const clean = stripComments(query || '');
+
+  // Check balanced parentheses & quotes
+  let parenCount = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  for (let i = 0; i < clean.length; i++) {
+    const char = clean[i];
+    if (char === "'" && clean[i - 1] !== '\\') {
+      if (!inDoubleQuote) inSingleQuote = !inSingleQuote;
+    } else if (char === '"' && clean[i - 1] !== '\\') {
+      if (!inSingleQuote) inDoubleQuote = !inDoubleQuote;
+    } else if (!inSingleQuote && !inDoubleQuote) {
+      if (char === '(' || char === '[') parenCount++;
+      if (char === ')' || char === ']') parenCount--;
+      if (parenCount < 0) {
+        return { valid: false, layer: 1, error: 'Syntax error: Unmatched closing bracket/parenthesis.' };
+      }
+    }
+  }
+  if (parenCount !== 0) {
+    return { valid: false, layer: 1, error: 'Syntax error: Unbalanced brackets or parentheses.' };
+  }
+  if (inSingleQuote || inDoubleQuote) {
+    return { valid: false, layer: 1, error: 'Syntax error: Unclosed quotation mark.' };
+  }
+
+  // Multi-statement block: never allow multiple statements in one DDL call
+  const stmts = clean.split(';').map((s) => s.trim()).filter(Boolean);
+  if (stmts.length > 1) {
+    return { valid: false, layer: 1, error: 'Multiple SQL statements are not allowed. Submit one DDL operation at a time.' };
+  }
+
+  const stmt = stmts[0] || clean;
+  const firstWordMatch = stmt.match(/^(\w+)\b/i);
+  const firstWord = firstWordMatch ? firstWordMatch[1].toUpperCase() : '';
+
+  if (!ALLOWED_DDL_OPS.has(firstWord)) {
+    return { valid: false, layer: 1, error: `Only CREATE, ALTER, DROP, and TRUNCATE are allowed in DDL mode. Found "${firstWord}".` };
+  }
+
+  // System catalogs protection (e.g. DROP TABLE pg_shadow is completely blocked!)
+  for (const pattern of SYSTEM_CATALOG_PATTERNS) {
+    if (pattern.test(stmt)) {
+      return { valid: false, layer: 3, error: 'Security restriction: Access to or modification of system catalogs is strictly prohibited.' };
+    }
+  }
+
+  // Block dangerous database-specific functions
+  const allDangerousFuncs = [
+    ...(DANGEROUS_FUNCTIONS[dbType] || []),
+    ...DANGEROUS_FUNCTIONS.postgres,
+    ...DANGEROUS_FUNCTIONS.mysql,
+    ...DANGEROUS_FUNCTIONS.sqlite,
+  ];
+  for (const fn of allDangerousFuncs) {
+    if (new RegExp(`\\b${fn}\\s*\\(`, 'i').test(stmt) || stmt.toLowerCase().includes(fn.toLowerCase())) {
+      return { valid: false, layer: 3, error: `Security restriction: Dangerous function "${fn}" is blocked.` };
+    }
+  }
+
+  return { valid: true };
+}
+
 /**
  * Legacy compatibility functions
  */
@@ -591,6 +664,7 @@ module.exports = {
   validateSecurity,
   validateQuery,
   validateQueryWrite,
+  validateQueryDDL,
   validateSQL,
   validateMongoQuery,
   extractAllTableReferences,

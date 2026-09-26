@@ -67,6 +67,33 @@ function extractValues(question, tableSchema) {
     quotedPairs.push(m[1].trim());
   }
 
+  // "Add Rahul with mark 85" — leading proper name, not a table word
+  const addNameMatch = q.match(/\b(?:add|insert|register)\s+([A-Za-z][A-Za-z]{1,40})\b/i);
+  if (addNameMatch) {
+    const rawCandidate = addNameMatch[1];
+    const candidate = rawCandidate.charAt(0).toUpperCase() + rawCandidate.slice(1);
+    const skipped = /^(student|students|record|row|user|employee|employees)$/i.test(candidate);
+    if (!skipped) {
+      for (const col of Object.keys(columns)) {
+        if (/name/i.test(col) && !(col in values)) {
+          values[col] = candidate;
+          break;
+        }
+      }
+    }
+  }
+
+  const fromValue = q.match(/\bfrom\s+([A-Za-z][A-Za-z0-9]{1,20})\b/i);
+  if (fromValue && !/^(the|table|database)$/i.test(fromValue[1])) {
+    for (const col of Object.keys(columns)) {
+      if (/department/i.test(col) && !(col in values)) {
+        const token = fromValue[1];
+        values[col] = token === token.toUpperCase() ? token : token.charAt(0).toUpperCase() + token.slice(1);
+        break;
+      }
+    }
+  }
+
   // Pattern: "named <value>", "called <value>", "name <value>"
   const namedMatch = q.match(/\b(?:named?|called?)\s+([A-Za-z][A-Za-z0-9\s_-]{0,40}?)(?=\s+(?:with|to|in|from|at|and|\d)|$)/i);
   if (namedMatch) {
@@ -167,6 +194,21 @@ function extractWhereValues(question, tableSchema) {
       if (/name/i.test(col) && !(col in where)) {
         where[col] = possessiveMatch[1];
         break;
+      }
+    }
+  }
+
+  // "Delete Rahul" — proper name without an explicit WHERE clause
+  const deleteNameMatch = q.match(/\b(?:delete|remove)\s+([A-Za-z][A-Za-z]{1,40})\b/i);
+  if (deleteNameMatch) {
+    const candidate = deleteNameMatch[1];
+    const skipped = /^(student|students|record|row|all|table)$/i.test(candidate);
+    if (!skipped) {
+      for (const col of Object.keys(columns)) {
+        if (/name/i.test(col) && !(col in where)) {
+          where[col] = candidate;
+          break;
+        }
       }
     }
   }
@@ -505,6 +547,20 @@ function findTargetTable(question, schema) {
     }
   }
 
+  // A single table, or the only table with a name column, is a safe fallback
+  // for requests like "Delete Rahul" that name a person but not the table.
+  if (!bestMatch && tables.length === 1) {
+    return tables[0];
+  }
+  if (!bestMatch) {
+    const withName = tables.filter((table) =>
+      Object.keys(schema.tables[table]?.columns || {}).some((col) => /name/i.test(col))
+    );
+    if (withName.length === 1 && /\b[A-Za-z]{2,}\b/.test(question)) {
+      return withName[0];
+    }
+  }
+
   // Fuzzy fallback on table names
   if (!bestMatch && tables.length > 0) {
     const qWords = q.split(/\s+/);
@@ -744,7 +800,7 @@ async function estimateAffectedRows(sql, adapter, dbType) {
     let countSQL;
     if (firstWord === 'UPDATE') {
       // Extract table and WHERE clause
-      const tableMatch = clean.match(/UPDATE\s+(\w+)\s+SET\s+.+?(?:WHERE\s+(.+))?$/is);
+      const tableMatch = clean.match(/UPDATE\s+["'`]?(\w+)["'`]?\s+SET\s+.+?(?:WHERE\s+(.+))?$/is);
       if (!tableMatch) return null;
       const table = tableMatch[1];
       const where = tableMatch[2];
@@ -753,7 +809,7 @@ async function estimateAffectedRows(sql, adapter, dbType) {
         : `SELECT COUNT(*) AS estimated_count FROM ${table}`;
     } else {
       // DELETE
-      const tableMatch = clean.match(/DELETE\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+))?/is);
+      const tableMatch = clean.match(/DELETE\s+FROM\s+["'`]?(\w+)["'`]?(?:\s+WHERE\s+(.+))?/is);
       if (!tableMatch) return null;
       const table = tableMatch[1];
       const where = tableMatch[2];

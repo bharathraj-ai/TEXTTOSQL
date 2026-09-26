@@ -45,6 +45,7 @@ app.listen(PORT, () => {
   console.log(`\n🚀 Server running on http://localhost:${PORT}`);
   console.log(`🔐 Auth endpoints: /api/auth/register, /api/auth/login, /api/auth/me`);
   console.log(`📡 Query endpoint:    POST /api/query`);
+  console.log(`✅ Confirm endpoint:  POST /api/query/confirm`);
   console.log(`✏️  Mutation endpoints: POST /api/mutation/stage | POST /api/mutation/confirm`);
   console.log(`❤️  Health check:      GET  http://localhost:${PORT}/health\n`);
 });

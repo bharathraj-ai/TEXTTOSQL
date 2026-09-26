@@ -30,7 +30,7 @@ export default function QueryInput({ onSubmit, isLoading, externalQuestion, onEx
             id="query-textarea"
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            placeholder='Ask a question like "Show top 5 customers by revenue" or "How many orders this month?"'
+            placeholder='Ask your database...  "Show students above 80"'
             rows={2}
             disabled={isLoading}
             onKeyDown={(e) => {

@@ -97,6 +97,21 @@ function classifyLocalRisk(sql = '', operation = '') {
 }
 
 /**
+ * Operations that must not run when the external reviewer is unavailable.
+ * CREATE TABLE is high risk but may still be staged for explicit confirmation.
+ * DROP, TRUNCATE, ALTER, and mass UPDATE/DELETE fail closed.
+ */
+function shouldFailClosedWithoutExternalReview(operation, localRisk) {
+  const op = String(operation || '').toUpperCase();
+  if (localRisk === 'CRITICAL' || op === 'DROP' || op === 'TRUNCATE' || op === 'DROP DATABASE') {
+    return true;
+  }
+  if (op === 'ALTER') return true;
+  if ((op === 'UPDATE' || op === 'DELETE') && localRisk === 'HIGH') return true;
+  return false;
+}
+
+/**
  * Combine local risk with AI risk: always takes the more severe risk level.
  */
 function maxRisk(risk1, risk2) {
@@ -193,7 +208,7 @@ function detectLocalSemanticMismatch(nlQuery, sql) {
     };
   }
 
-  const isNlDropExplicit = /\b(drop\s+table|delete\s+table|remove\s+table|destroy\s+table)\b/i.test(q);
+  const isNlDropExplicit = /\b(drop\s+table|delete\s+table|remove\s+table|destroy\s+table|drop\s+(?:the\s+)?[a-z0-9_]+(?:\s+table)?)\b/i.test(q);
   const isNlTruncateExplicit = /\b(truncate|empty\s+table|wipe\s+table)\b/i.test(q);
 
   // 1. DROP TABLE generated when user did not explicitly request table deletion
@@ -459,8 +474,32 @@ async function reviewSQL({
       return result;
     }
 
-    // High risk or DDL / destructive operations without OpenRouter: BLOCK
-    if (localRisk === 'CRITICAL' || localRisk === 'HIGH') {
+    if ((localRisk === 'HIGH' || localRisk === 'CRITICAL') && !/\bDROP\s+DATABASE\b/i.test(generatedSQL)) {
+      const staged = {
+        approved: true,
+        risk: localRisk,
+        operation: detectedOp,
+        semantic_match: true,
+        issues: ['OpenRouter review is unavailable. This change is staged for explicit confirmation under local validation.'],
+        reason: 'Local validation passed. Explicit confirmation is required before this change is applied.',
+        reviewUnavailable: true,
+        source: 'local_fallback',
+      };
+      logReviewAudit({
+        userId,
+        databaseType: dbType,
+        operation: detectedOp,
+        riskLevel: localRisk,
+        approved: true,
+        validationReason: staged.reason,
+        executionStatus: 'STAGED_LOCAL_FALLBACK',
+        sql: generatedSQL,
+      });
+      return staged;
+    }
+
+    // DROP DATABASE stays blocked when the external reviewer is unavailable.
+    if (shouldFailClosedWithoutExternalReview(detectedOp, localRisk)) {
       const result = {
         approved: false,
         risk: localRisk,
@@ -482,6 +521,30 @@ async function reviewSQL({
         approved: false,
         validationReason: result.reason,
         executionStatus: 'BLOCKED_UNAVAILABLE_KEY',
+        sql: generatedSQL,
+      });
+      return result;
+    }
+
+    if (String(detectedOp).toUpperCase() === 'CREATE') {
+      const result = {
+        approved: true,
+        risk: 'HIGH',
+        operation: 'CREATE',
+        semantic_match: true,
+        issues: ['OPENROUTER_API_KEY is not configured. CREATE TABLE is staged for explicit confirmation under local validation.'],
+        reason: 'Local validation passed for CREATE TABLE. Explicit user confirmation is still required.',
+        reviewUnavailable: true,
+        source: 'local_fallback',
+      };
+      logReviewAudit({
+        userId,
+        databaseType: dbType,
+        operation: 'CREATE',
+        riskLevel: 'HIGH',
+        approved: true,
+        validationReason: result.reason,
+        executionStatus: 'STAGED_LOCAL_FALLBACK',
         sql: generatedSQL,
       });
       return result;
@@ -659,8 +722,32 @@ async function reviewSQL({
       return result;
     }
 
-    // For DDL and destructive operations: OpenRouter unavailable -> BLOCK execution!
-    if (localRisk === 'CRITICAL' || localRisk === 'HIGH') {
+    if ((localRisk === 'HIGH' || localRisk === 'CRITICAL') && !/\bDROP\s+DATABASE\b/i.test(generatedSQL)) {
+      const staged = {
+        approved: true,
+        risk: localRisk,
+        operation: detectedOp,
+        semantic_match: true,
+        issues: [`OpenRouter review unavailable (${failureMsg}). This change is staged for explicit confirmation under local validation.`],
+        reason: 'Local validation passed. Explicit confirmation is required before this change is applied.',
+        reviewUnavailable: true,
+        source: 'local_fallback',
+      };
+      logReviewAudit({
+        userId,
+        databaseType: dbType,
+        operation: detectedOp,
+        riskLevel: localRisk,
+        approved: true,
+        validationReason: staged.reason,
+        executionStatus: 'STAGED_LOCAL_FALLBACK',
+        sql: generatedSQL,
+      });
+      return staged;
+    }
+
+    // DROP DATABASE stays blocked when the external reviewer is unavailable.
+    if (shouldFailClosedWithoutExternalReview(detectedOp, localRisk)) {
       const result = {
         approved: false,
         risk: localRisk,
@@ -683,6 +770,30 @@ async function reviewSQL({
         approved: false,
         validationReason: result.reason,
         executionStatus: 'BLOCKED_REVIEW_UNAVAILABLE',
+        sql: generatedSQL,
+      });
+      return result;
+    }
+
+    if (String(detectedOp).toUpperCase() === 'CREATE') {
+      const result = {
+        approved: true,
+        risk: 'HIGH',
+        operation: 'CREATE',
+        semantic_match: true,
+        issues: [`OpenRouter review unavailable (${failureMsg}). CREATE TABLE is staged for explicit confirmation under local validation.`],
+        reason: 'Local validation passed for CREATE TABLE. Explicit user confirmation is still required.',
+        reviewUnavailable: true,
+        source: 'local_fallback',
+      };
+      logReviewAudit({
+        userId,
+        databaseType: dbType,
+        operation: 'CREATE',
+        riskLevel: 'HIGH',
+        approved: true,
+        validationReason: result.reason,
+        executionStatus: 'STAGED_LOCAL_FALLBACK',
         sql: generatedSQL,
       });
       return result;

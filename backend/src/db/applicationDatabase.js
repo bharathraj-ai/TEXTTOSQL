@@ -5,6 +5,7 @@
 // which stores user credentials and saved connection records.
 // This is strictly separate from user-provided databases.
 
+require('dotenv').config();
 const { Pool } = require('pg');
 
 function formatDbError(err) {

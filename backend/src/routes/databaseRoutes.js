@@ -13,12 +13,15 @@ const {
   getUserStatus,
   getUserAdapter,
   getUserPool,
+  assertUserConnection,
 } = require('../services/connectionManager');
+const { browseTable, applyDirectChange } = require('../services/tableWorkspaceService');
 const {
   invalidateUserSchemaCache,
   getDatabaseSchema,
   getSchemaSummary,
 } = require('../services/schemaService');
+const { validateQuery } = require('../utils/sqlValidator');
 
 const router = express.Router();
 
@@ -203,6 +206,68 @@ router.get('/schema', async (req, res) => {
 });
 
 /**
+ * GET /api/database/browse?table=name
+ * Read-only page of one table that already exists in the user's schema.
+ * The table name is checked against the schema. Client SQL is not accepted.
+ */
+router.get('/browse', async (req, res) => {
+  try {
+    const requested = String(req.query.table || '').trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(requested)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Choose a table from the sidebar.',
+      });
+    }
+
+    const adapter = await getUserAdapter(req.user.id);
+    const schema = await getDatabaseSchema(false, adapter, req.user.id);
+    const tableName = Object.keys(schema.tables || {}).find(
+      (name) => name.toLowerCase() === requested.toLowerCase()
+    );
+
+    if (!tableName) {
+      return res.status(404).json({
+        success: false,
+        error: 'That table is not in the connected database.',
+      });
+    }
+
+    const dbType = adapter.type || 'postgres';
+    const quoted = dbType === 'mysql' ? `\`${tableName}\`` : `"${tableName}"`;
+    const sql = `SELECT * FROM ${quoted} LIMIT 100`;
+    const validation = validateQuery(sql, schema, dbType, 'read');
+    if (!validation.valid) {
+      return res.status(400).json({ success: false, error: validation.error });
+    }
+
+    const started = Date.now();
+    const result = await adapter.executeQuery(sql);
+    const tableInfo = schema.tables[tableName];
+    const columns = Object.entries(tableInfo.columns || {}).map(([name, type]) => ({
+      name,
+      type: typeof type === 'string' ? type : 'text',
+      primaryKey: (tableInfo.primaryKeys || []).includes(name),
+    }));
+
+    return res.json({
+      success: true,
+      table: tableName,
+      columns,
+      rows: result.rows || [],
+      executionTime: result.executionTime || (Date.now() - started),
+      rowCount: (result.rows || []).length,
+    });
+  } catch (err) {
+    console.error('[DATABASE_ROUTE] Browse error:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Could not load table data.',
+    });
+  }
+});
+
+/**
  * GET /api/database/summary
  * Retrieve a compact text summary of the current schema
  */
@@ -222,6 +287,60 @@ router.get('/summary', async (req, res) => {
       success: false,
       error: 'Failed to retrieve schema summary.',
     });
+  }
+});
+
+/**
+ * GET /api/database/tables/:table?page=1&limit=50&sort=&dir=asc&q=
+ * Server-side page of a real table in the signed-in user's database.
+ */
+router.get('/tables/:table', async (req, res) => {
+  try {
+    const { adapter } = await assertUserConnection(req.user.id, req.query.connectionId);
+    const schema = await getDatabaseSchema(false, adapter, req.user.id);
+    const pageData = await browseTable(adapter, schema, {
+      table: req.params.table,
+      page: req.query.page,
+      limit: req.query.limit,
+      sort: req.query.sort,
+      dir: req.query.dir,
+      q: req.query.q,
+    });
+    return res.json({ success: true, connectionId: req.query.connectionId || null, ...pageData });
+  } catch (err) {
+    const status = err.statusCode || 400;
+    return res.status(status).json({ success: false, error: err.message || 'Could not load table data.' });
+  }
+});
+
+/**
+ * POST /api/database/rows
+ * Direct single-row insert, update, or delete. The client sends column values, not SQL.
+ */
+router.post('/rows', async (req, res) => {
+  try {
+    const { adapter } = await assertUserConnection(req.user.id, req.body?.connectionId);
+    const schema = await getDatabaseSchema(false, adapter, req.user.id);
+    const result = await applyDirectChange(adapter, schema, {
+      action: req.body?.action,
+      table: req.body?.table,
+      primaryKey: req.body?.primaryKey,
+      changes: req.body?.changes,
+      values: req.body?.values,
+    });
+    return res.json({
+      success: true,
+      message: result.action === 'insert'
+        ? '1 row inserted.'
+        : result.action === 'delete'
+          ? '1 row deleted.'
+          : '1 row updated.',
+      affectedRows: result.affectedRows,
+      table: result.table,
+    });
+  } catch (err) {
+    const status = err.statusCode || 400;
+    return res.status(status).json({ success: false, error: err.message || 'The row change was not applied.' });
   }
 });
 

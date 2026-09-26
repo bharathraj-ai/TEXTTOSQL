@@ -9,6 +9,7 @@
 const express = require('express');
 const { processNaturalLanguageQuery, processClarifiedQuery, getQuerySuggestions, previewQuery } = require('../services/queryService');
 const { getAuditLogs } = require('../services/auditService');
+const { confirmAndExecuteOperation } = require('../services/confirmationService');
 
 const router = express.Router();
 
@@ -38,7 +39,7 @@ function extractUserId(req) {
  */
 router.post('/query', async (req, res) => {
   try {
-    const { question } = req.body;
+    const question = req.body?.question || req.body?.query;
 
     if (!question || typeof question !== 'string' || question.trim().length === 0) {
       return res.status(400).json({
@@ -49,16 +50,67 @@ router.post('/query', async (req, res) => {
     }
 
     const userId = extractUserId(req);
-    const result = await processNaturalLanguageQuery(question, userId);
+    const result = await processNaturalLanguageQuery(question, userId, {
+      currentTable: req.body?.currentTable,
+      connectionId: req.body?.connectionId,
+    });
 
-    const statusCode = result.success ? 200 : 400;
-    return res.status(statusCode).json(result);
+    const statusCode = result.statusCode || (result.success ? 200 : 400);
+    const { statusCode: _statusCode, ...body } = result;
+    return res.status(statusCode).json(body);
 
   } catch (err) {
     console.error('[ROUTE] Unexpected error:', err.message);
     return res.status(500).json({
       success: false,
       type: 'query_error',
+      error: 'An unexpected error occurred. Please try again.',
+    });
+  }
+});
+
+/**
+ * POST /api/query/confirm
+ * Executes a previously staged operation by server-side operationId.
+ * Ignores any SQL supplied by the client.
+ */
+router.post('/query/confirm', async (req, res) => {
+  try {
+    const operationId = req.body?.operationId;
+    const confirmationToken = req.body?.confirmationToken;
+    const clientSql = req.body?.sql;
+
+    if (clientSql && !operationId && !confirmationToken) {
+      return res.status(400).json({
+        success: false,
+        type: 'mutation_error',
+        error: 'Raw SQL cannot be executed from the client. Confirm with the server-issued operationId.',
+      });
+    }
+
+    if (!operationId && !confirmationToken) {
+      return res.status(400).json({
+        success: false,
+        type: 'mutation_error',
+        error: 'operationId is required.',
+      });
+    }
+
+    const userId = extractUserId(req);
+    const result = await confirmAndExecuteOperation({
+      operationId: operationId || null,
+      confirmationToken: operationId ? null : confirmationToken,
+      confirmationText: req.body?.confirmationText || '',
+      userId,
+    });
+    const statusCode = result.statusCode || (result.success ? 200 : 400);
+    const { statusCode: _statusCode, ...body } = result;
+    return res.status(statusCode).json(body);
+  } catch (err) {
+    console.error('[ROUTE] Confirm error:', err.message);
+    return res.status(500).json({
+      success: false,
+      type: 'mutation_error',
       error: 'An unexpected error occurred. Please try again.',
     });
   }

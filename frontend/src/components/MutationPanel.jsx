@@ -9,7 +9,7 @@ const API_URL = 'http://localhost:5000/api';
  * Natural Language → Local Intent → Schema → Local SQL Generator → Local SQL Validator
  * → OpenRouter Semantic Reviewer → Risk Assessment → User Confirmation → Local Final Check → Execution
  */
-export default function MutationPanel({ token, dbStatus }) {
+export default function MutationPanel({ token, dbStatus, onExecutionSuccess, onAuthError }) {
   const [question, setQuestion] = useState('');
   const [stagedQuestion, setStagedQuestion] = useState('');
   const [isStaging, setIsStaging] = useState(false);
@@ -51,6 +51,13 @@ export default function MutationPanel({ token, dbStatus }) {
       });
       const data = await res.json();
 
+      if (res.status === 401) {
+        const msg = data.error || 'Your session has expired or is invalid. Please log in again.';
+        setError(msg);
+        if (onAuthError) onAuthError(msg);
+        return;
+      }
+
       if (!data.success) {
         setError(data.error || 'Failed to stage the operation.');
         return;
@@ -67,20 +74,27 @@ export default function MutationPanel({ token, dbStatus }) {
 
   // ── Confirm and execute ──────────────────────────
   const handleConfirm = async () => {
-    if (!stagedPlan?.confirmationToken || isConfirming || stagedPlan.canConfirm === false) return;
+    if (!(stagedPlan?.operationId || stagedPlan?.confirmationToken) || isConfirming || stagedPlan.canConfirm === false) return;
     setIsConfirming(true);
     setError('');
 
     try {
-      const res = await fetch(`${API_URL}/mutation/confirm`, {
+      const res = await fetch(`${API_URL}/query/confirm`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`,
         },
-        body: JSON.stringify({ confirmationToken: stagedPlan.confirmationToken }),
+        body: JSON.stringify({ operationId: stagedPlan.operationId || stagedPlan.confirmationToken }),
       });
       const data = await res.json();
+
+      if (res.status === 401) {
+        const msg = data.error || 'Your session has expired or is invalid. Please log in again.';
+        setError(msg);
+        if (onAuthError) onAuthError(msg);
+        return;
+      }
 
       if (!data.success) {
         setError(data.error || 'Failed to execute the operation.');
@@ -89,6 +103,7 @@ export default function MutationPanel({ token, dbStatus }) {
 
       setMutationResult(data);
       setStagedPlan(null);
+      if (onExecutionSuccess) onExecutionSuccess();
     } catch (err) {
       console.error('Confirm error:', err);
       setError('Failed to connect to the server.');

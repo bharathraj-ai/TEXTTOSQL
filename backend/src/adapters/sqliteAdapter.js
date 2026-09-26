@@ -93,6 +93,7 @@ class SqliteAdapter {
           for (const tableName of tables) {
             schema.tables[tableName] = {
               columns: {},
+              nullable: {},
               primaryKeys: [],
             };
 
@@ -101,6 +102,7 @@ class SqliteAdapter {
                 if (colErr) return rejCol(colErr);
                 for (const col of cols || []) {
                   schema.tables[tableName].columns[col.name] = (col.type || 'TEXT').toLowerCase();
+                  schema.tables[tableName].nullable[col.name] = col.notnull === 0;
                   if (col.pk > 0) {
                     schema.tables[tableName].primaryKeys.push(col.name);
                   }

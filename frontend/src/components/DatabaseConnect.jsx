@@ -107,7 +107,9 @@ export default function DatabaseConnect({ token, dbStatus, onStatusChange, onNav
 
       const data = await res.json();
       if (res.status === 401) {
-        setErrorMsg('Your session has expired or is invalid. Please log in again.');
+        const msg = data.error || 'Your session has expired or is invalid. Please log in again.';
+        setErrorMsg(msg);
+        if (onAuthError) onAuthError(msg);
         return;
       }
       if (!data.success) {
@@ -148,7 +150,9 @@ export default function DatabaseConnect({ token, dbStatus, onStatusChange, onNav
 
       const data = await res.json();
       if (res.status === 401) {
-        setErrorMsg('Your session has expired or is invalid. Please log in again.');
+        const msg = data.error || 'Your session has expired or is invalid. Please log in again.';
+        setErrorMsg(msg);
+        if (onAuthError) onAuthError(msg);
         return;
       }
       if (!data.success) {
@@ -157,6 +161,7 @@ export default function DatabaseConnect({ token, dbStatus, onStatusChange, onNav
         setSuccessMsg(`${data.name || 'Database'} connected successfully!`);
         setDatabaseUrl('');
         setConnectionName('');
+        setShowPassword(false);
         setShowChangeForm(false);
         if (onStatusChange) {
           onStatusChange({
@@ -167,8 +172,10 @@ export default function DatabaseConnect({ token, dbStatus, onStatusChange, onNav
             dbType: data.dbType,
             tableCount: data.tableCount,
             tables: data.tables,
+            connectionId: data.connectionId || null,
           });
         }
+        if (onNavigateToQuery) onNavigateToQuery();
       }
     } catch (err) {
       setErrorMsg('Failed to connect to database. Ensure backend server is running.');
@@ -193,7 +200,9 @@ export default function DatabaseConnect({ token, dbStatus, onStatusChange, onNav
 
       const data = await res.json();
       if (res.status === 401) {
-        setErrorMsg('Your session has expired or is invalid. Please log in again.');
+        const msg = data.error || 'Your session has expired or is invalid. Please log in again.';
+        setErrorMsg(msg);
+        if (onAuthError) onAuthError(msg);
         return;
       }
       if (!data.success) {
@@ -210,8 +219,10 @@ export default function DatabaseConnect({ token, dbStatus, onStatusChange, onNav
             dbType: data.dbType || 'postgres',
             tableCount: data.tableCount,
             tables: data.tables,
+            connectionId: data.connectionId || null,
           });
         }
+        if (onNavigateToQuery) onNavigateToQuery();
       }
     } catch (err) {
       setErrorMsg('Quick connect failed.');
@@ -235,6 +246,12 @@ export default function DatabaseConnect({ token, dbStatus, onStatusChange, onNav
       });
 
       const data = await res.json();
+      if (res.status === 401) {
+        const msg = data.error || 'Your session has expired or is invalid. Please log in again.';
+        setErrorMsg(msg);
+        if (onAuthError) onAuthError(msg);
+        return;
+      }
       if (data.success) {
         setSuccessMsg('Database disconnected.');
         if (onStatusChange) {
@@ -246,6 +263,7 @@ export default function DatabaseConnect({ token, dbStatus, onStatusChange, onNav
             dbType: '',
             tableCount: 0,
             tables: [],
+            connectionId: null,
           });
         }
       } else {
@@ -386,7 +404,7 @@ export default function DatabaseConnect({ token, dbStatus, onStatusChange, onNav
               className="btn-dash-action"
               onClick={onNavigateToQuery}
             >
-              ⚡ Open Query Console
+              Open Database Workspace
             </button>
           </div>
         </div>
