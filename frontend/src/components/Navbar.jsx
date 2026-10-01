@@ -1,69 +1,123 @@
-export default function Navbar({ user, activePage, onNavigate, onLogout, dbStatus }) {
+export default function Navbar({
+  user,
+  activePage,
+  onNavigate,
+  onLogout,
+  dbStatus,
+}) {
+  const isConnected = dbStatus && dbStatus.connected;
+  const dbName = dbStatus?.databaseName || 'neondb';
+  const userName = user?.name || 'Bharath Raj';
+
   return (
-    <header className="navbar">
-      <div className="navbar-container">
-        <div className="navbar-brand" onClick={() => onNavigate(user ? 'dashboard' : 'login')}>
-          <span className="navbar-logo">⚡</span>
-          <span className="navbar-title">Natural Language → SQL</span>
+    <header className="navbar-premium-root">
+      <div className="navbar-container-inner">
+        {/* Left: Brand + Database Connection Context */}
+        <div className="navbar-left-brand-group">
+          <div
+            className="navbar-brand-button"
+            onClick={() => onNavigate(user ? 'dashboard' : 'login')}
+            role="button"
+            tabIndex={0}
+          >
+            <div className="brand-logo-cube">
+              <span className="brand-symbol">@v</span>
+            </div>
+            <span className="brand-title">@Intell a</span>
+          </div>
+
+          <div className="navbar-divider" />
+
+          {/* Database Context */}
+          <div className="navbar-database-badge">
+            <span className="badge-dim-label">Database:</span>
+            <strong className="badge-db-name">{dbName}</strong>
+            <span className={`db-status-dot-pulse ${isConnected ? 'connected' : 'disconnected'}`} />
+            <span className="db-status-text">{isConnected ? 'Connected' : 'Disconnected'}</span>
+          </div>
         </div>
 
+        {/* Center: Navigation Pills */}
         {user && (
-          <nav className="navbar-nav">
+          <nav className="navbar-center-nav">
             <button
-              className={`nav-link ${activePage === 'dashboard' ? 'active' : ''}`}
+              type="button"
+              className={`nav-pill-item ${activePage === 'dashboard' ? 'active' : ''}`}
               onClick={() => onNavigate('dashboard')}
             >
               Dashboard
             </button>
             <button
-              className={`nav-link ${activePage === 'database' ? 'active' : ''}`}
-              onClick={() => onNavigate('database')}
-            >
-              Database
-            </button>
-            <button
-              className={`nav-link ${activePage === 'query' ? 'active' : ''}`}
+              type="button"
+              className={`nav-pill-item ${activePage === 'query' ? 'active' : ''}`}
               onClick={() => onNavigate('query')}
             >
-              Query
+              Workspace
+            </button>
+            <button
+              type="button"
+              className={`nav-pill-item ${activePage === 'database' ? 'active' : ''}`}
+              onClick={() => onNavigate('database')}
+            >
+              Connections
             </button>
           </nav>
         )}
 
-        <div className="navbar-right">
-          {dbStatus && (
-            <div className={`db-status-pill ${dbStatus.connected ? 'connected' : 'disconnected'}`}>
-              <span className="status-dot"></span>
-              <span className="status-text">
-                {dbStatus.connected ? (
-                  <>
-                    <span className="pill-db-icon">
-                      {dbStatus.dbType === 'mongodb' ? '🍃' : dbStatus.dbType === 'mysql' ? '🐬' : dbStatus.dbType === 'sqlite' ? '🗄️' : '🐘'}
-                    </span>
-                    {dbStatus.databaseName || 'Connected'}
-                  </>
-                ) : 'No Database'}
-              </span>
-            </div>
-          )}
-
+        {/* Right: Quick Search, Notifications, User Avatar */}
+        <div className="navbar-right-user-group">
           {user ? (
-            <div className="user-profile">
-              <span className="user-name">👤 {user.name}</span>
-              <button className="logout-btn" onClick={onLogout} title="Logout">
-                Logout
-              </button>
-            </div>
-          ) : (
-            <div className="auth-nav-btns">
+            <>
+              {/* Quick Search Shortcut */}
               <button
-                className={`nav-link ${activePage === 'login' ? 'active' : ''}`}
+                type="button"
+                className="nav-icon-action-btn"
+                title="Quick search"
+                onClick={() => onNavigate('query')}
+              >
+                <span>s</span>
+              </button>
+
+              {/* Notifications */}
+              <button
+                type="button"
+                className="nav-icon-action-btn relative"
+                title="Notifications"
+              >
+                <span>N</span>
+                <span className="notification-unread-dot" />
+              </button>
+
+              <div className="navbar-divider" />
+
+              {/* User Profile */}
+              <div className="navbar-user-chip">
+                <div className="user-initial-badge">
+                  {userName[0]?.toUpperCase() || 'B'}
+                </div>
+                <span className="user-name-label">{userName}</span>
+                <button
+                  type="button"
+                  className="nav-logout-ghost-btn"
+                  onClick={onLogout}
+                  title="Sign out"
+                >
+                  Log out
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="navbar-auth-actions">
+              <button
+                type="button"
+                className={`btn btn-secondary btn-sm ${activePage === 'login' ? 'active' : ''}`}
                 onClick={() => onNavigate('login')}
               >
                 Sign In
               </button>
               <button
-                className="btn-primary-sm"
+                type="button"
+                className="btn btn-primary btn-sm"
                 onClick={() => onNavigate('register')}
               >
                 Sign Up

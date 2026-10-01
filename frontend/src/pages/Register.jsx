@@ -59,94 +59,98 @@ export default function Register({ onRegisterSuccess, onNavigateToLogin }) {
   };
 
   return (
-    <div className="auth-container">
-      <div className="auth-card">
-        <div className="auth-header">
-          <div className="auth-icon">🚀</div>
-          <h2>Create Your Account</h2>
-          <p>Get started with multi-user natural language database queries</p>
+    <div className="w-full max-w-[420px] bg-white border border-slate-200 rounded-2xl shadow-sm p-8 mx-auto">
+      <div className="text-center mb-8">
+        <h1 className="text-2xl font-bold text-slate-900">Intella</h1>
+        <p className="text-sm font-medium text-blue-600 mb-6">AI Database Copilot</p>
+        <h2 className="text-xl font-semibold text-slate-800">Create Account</h2>
+        <p className="text-sm text-slate-500 mt-1">Get started with natural language database queries.</p>
+      </div>
+
+      {error && (
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 text-sm rounded-lg flex items-start gap-2">
+          <span>⚠️</span>
+          <p>{error}</p>
         </div>
+      )}
 
-        {error && (
-          <div className="auth-error-alert">
-            <span>⚠️</span>
-            <p>{error}</p>
-          </div>
-        )}
-
-        <form onSubmit={handleSubmit} className="auth-form">
-          <div className="form-group">
-            <label htmlFor="reg-name">Full Name</label>
-            <input
-              id="reg-name"
-              type="text"
-              placeholder="e.g. Bharath"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              disabled={isLoading}
-              required
-            />
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="reg-email">Email Address</label>
-            <input
-              id="reg-email"
-              type="email"
-              placeholder="e.g. bharath@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              disabled={isLoading}
-              required
-            />
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="reg-password">Password (min. 6 characters)</label>
-            <input
-              id="reg-password"
-              type="password"
-              placeholder="••••••••"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={isLoading}
-              required
-            />
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="reg-confirm-password">Confirm Password</label>
-            <input
-              id="reg-confirm-password"
-              type="password"
-              placeholder="••••••••"
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              disabled={isLoading}
-              required
-            />
-          </div>
-
-          <button
-            type="submit"
-            className="btn-auth-submit"
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div className="space-y-1.5">
+          <label htmlFor="reg-name" className="block text-sm font-medium text-slate-700">Full Name</label>
+          <input
+            id="reg-name"
+            type="text"
+            placeholder="e.g. Bharath"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
             disabled={isLoading}
-          >
-            {isLoading ? 'Creating Account...' : 'Sign Up'}
-          </button>
-        </form>
-
-        <div className="auth-footer">
-          <p>
-            Already have an account?{' '}
-            <button
-              className="text-link-btn"
-              onClick={onNavigateToLogin}
-            >
-              Sign In
-            </button>
-          </p>
+            required
+            className="w-full h-11 px-4 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          />
         </div>
+
+        <div className="space-y-1.5">
+          <label htmlFor="reg-email" className="block text-sm font-medium text-slate-700">Email Address</label>
+          <input
+            id="reg-email"
+            type="email"
+            placeholder="e.g. bharath@example.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            disabled={isLoading}
+            required
+            className="w-full h-11 px-4 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label htmlFor="reg-password" className="block text-sm font-medium text-slate-700">Password</label>
+          <input
+            id="reg-password"
+            type="password"
+            placeholder="••••••••"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            disabled={isLoading}
+            required
+            className="w-full h-11 px-4 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <label htmlFor="reg-confirm-password" className="block text-sm font-medium text-slate-700">Confirm Password</label>
+          <input
+            id="reg-confirm-password"
+            type="password"
+            placeholder="••••••••"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            disabled={isLoading}
+            required
+            className="w-full h-11 px-4 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          />
+        </div>
+
+        <button
+          type="submit"
+          disabled={isLoading}
+          className="w-full h-11 mt-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center"
+        >
+          {isLoading ? 'Creating Account...' : 'Sign Up'}
+        </button>
+      </form>
+
+      <div className="mt-6 text-center text-sm text-slate-500">
+        <p>
+          Already have an account?{' '}
+          <button
+            type="button"
+            className="text-blue-600 hover:text-blue-700 font-medium hover:underline transition-colors focus:outline-none"
+            onClick={onNavigateToLogin}
+          >
+            Sign In
+          </button>
+        </p>
       </div>
     </div>
   );

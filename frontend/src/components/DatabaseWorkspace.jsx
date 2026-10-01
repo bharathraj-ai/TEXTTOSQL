@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useMemo } from 'react';
+import TableToolbar from './database/TableToolbar';
+import TableView from './database/TableView';
+import TablePagination from './database/TablePagination';
+import TableStructure from './database/TableStructure';
+import { AddRowModal, DeleteRowModal } from './database/TableEditor';
+import AnalyticsDashboard from './analytics/AnalyticsDashboard';
+import VendorChat from './vendor/VendorChat';
+import { useToast } from './common/Toast';
 
 const API = 'http://localhost:5000/api';
 
@@ -7,482 +15,821 @@ function rowKey(row, primaryKeys) {
   return primaryKeys.map((key) => row[key]).join('|');
 }
 
-export default function DatabaseWorkspace({ token, dbStatus, onAuthError }) {
-  const [schema, setSchema] = useState(null);
-  const [selected, setSelected] = useState('');
-  const [tab, setTab] = useState('data');
-  const [page, setPage] = useState(1);
-  const [sort, setSort] = useState('');
-  const [dir, setDir] = useState('asc');
-  const [filter, setFilter] = useState('');
-  const [tableData, setTableData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [drafts, setDrafts] = useState({});
-  const [editing, setEditing] = useState(null);
-  const [addOpen, setAddOpen] = useState(false);
-  const [addValues, setAddValues] = useState({});
-  const [menu, setMenu] = useState(null);
-  const [deleteTarget, setDeleteTarget] = useState(null);
-  const [chat, setChat] = useState('');
-  const [messages, setMessages] = useState([]);
-  const [pending, setPending] = useState(null);
-  const [confirmText, setConfirmText] = useState('');
-  const [busy, setBusy] = useState('');
-  const [queryView, setQueryView] = useState(null);
-  const [selectedRow, setSelectedRow] = useState('');
+export default function DatabaseWorkspace({
+  token,
+  dbStatus,
+  onAuthError,
+  user,
+  schema: propSchema,
+  selectedTable: propSelectedTable,
+  onSelectTable: propOnSelectTable,
+  onRefreshSchema: propOnRefreshSchema,
+  isRefreshingSchema: propIsRefreshingSchema,
+  activeTab: propActiveTab = 'data',
+  onTabChange: propOnTabChange,
+  onOpenMobileSidebar,
+  openCopilotRequest = 0,
+}) {
+  const toast = useToast();
 
-  const headers = {
+  // ── Schema & Selected Table ─────────────────────────
+  const [internalSchema, setInternalSchema] = useState(null);
+  const [internalSelectedTable, setInternalSelectedTable] = useState('');
+  const [activeTab, setActiveTab] = useState(propActiveTab || 'data');
+  const [internalIsRefreshingSchema, setInternalIsRefreshingSchema] = useState(false);
+
+  const schema = propSchema || internalSchema;
+  const selectedTable = propSelectedTable || internalSelectedTable;
+  const isRefreshingSchema = propIsRefreshingSchema !== undefined ? propIsRefreshingSchema : internalIsRefreshingSchema;
+
+  // ── Table Data & Pagination ─────────────────────────
+  const [tableData, setTableData] = useState(null);
+  const [isLoadingTable, setIsLoadingTable] = useState(false);
+  const [tableError, setTableError] = useState('');
+  const [page, setPage] = useState(1);
+  const [limit, setLimit] = useState(50);
+  const [sortCol, setSortCol] = useState('');
+  const [sortDir, setSortDir] = useState('asc');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [hiddenColumns, setHiddenColumns] = useState({});
+
+  // ── Multi-Filter Builder State ──────────────────────
+  const [activeFilters, setActiveFilters] = useState([]); // [{ col, op, val }]
+
+  // ── Query Result View (when user executes a SELECT via @Intella) ──
+  const [queryView, setQueryView] = useState(null);
+
+  // ── Inline Editing State ────────────────────────────
+  const [drafts, setDrafts] = useState({}); // { [rowKey]: { original: {}, changes: {} } }
+  const [isSavingDrafts, setIsSavingDrafts] = useState(false);
+
+  // ── Modals & Row Operations ─────────────────────────
+  const [isAddRowOpen, setIsAddRowOpen] = useState(false);
+  const [isInsertingRow, setIsInsertingRow] = useState(false);
+  const [deleteTargetRow, setDeleteTargetRow] = useState(null);
+  const [isDeletingRow, setIsDeletingRow] = useState(false);
+  const [selectedRowKey, setSelectedRowKey] = useState('');
+
+  // ── Export Dropdown ─────────────────────────────────
+  const [exportDropdownOpen, setExportDropdownOpen] = useState(false);
+
+  // ── Right Copilot Drawer Toggle ─────────────────────
+  const [isCopilotOpen, setIsCopilotOpen] = useState(true);
+  const [analyticsRefresh, setAnalyticsRefresh] = useState(0);
+
+  useEffect(() => {
+    if (openCopilotRequest > 0) setIsCopilotOpen(true);
+  }, [openCopilotRequest]);
+
+  const authHeaders = useMemo(() => ({
     'Content-Type': 'application/json',
     Authorization: `Bearer ${token}`,
-  };
+  }), [token]);
 
-  const loadSchema = useCallback(async () => {
-    const res = await fetch(`${API}/database/schema`, { headers: { Authorization: `Bearer ${token}` } });
-    const data = await res.json();
-    if (res.status === 401) {
-      onAuthError?.(data.error);
+  // ── Load Database Schema ────────────────────────────
+  const loadSchema = useCallback(async (preferredTable = '') => {
+    if (propOnRefreshSchema) {
+      await propOnRefreshSchema(preferredTable);
       return;
     }
-    if (data.success) {
-      setSchema(data.schema);
-      const names = Object.keys(data.schema?.tables || {});
-      setSelected((current) => current || names[0] || '');
-    }
-  }, [token, onAuthError]);
-
-  const loadTable = useCallback(async (tableName = selected, nextPage = page) => {
-    if (!tableName) return;
-    setLoading(true);
-    setError('');
+    if (!token) return;
+    setInternalIsRefreshingSchema(true);
     try {
-      const params = new URLSearchParams({
-        page: String(nextPage),
-        limit: '50',
-        sort,
-        dir,
-        q: filter,
-      });
-      if (dbStatus.connectionId) params.set('connectionId', String(dbStatus.connectionId));
-      const res = await fetch(`${API}/database/tables/${encodeURIComponent(tableName)}?${params}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(`${API}/database/schema`, { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json();
-      if (!data.success) {
-        setError(data.error || 'Could not load this table.');
-        setTableData(null);
-      } else {
-        setTableData(data);
-        setQueryView(null);
+      if (res.status === 401) {
+        onAuthError?.(data.error);
+        return;
+      }
+      if (data.success && data.schema) {
+        setInternalSchema(data.schema);
+        const tableNames = Object.keys(data.schema.tables || {});
+        if (tableNames.length > 0) {
+          setInternalSelectedTable((curr) => {
+            if (preferredTable && tableNames.includes(preferredTable)) return preferredTable;
+            if (curr && tableNames.includes(curr)) return curr;
+            return tableNames[0];
+          });
+        }
       }
     } catch {
-      setError('Could not load this table.');
+      toast.error('Failed to load database schema.');
     } finally {
-      setLoading(false);
+      setInternalIsRefreshingSchema(false);
     }
-  }, [selected, page, sort, dir, filter, token, dbStatus.connectionId]);
+  }, [token, onAuthError, toast, propOnRefreshSchema]);
 
-  useEffect(() => { loadSchema(); }, [loadSchema]);
-  useEffect(() => { if (selected) loadTable(selected, page); }, [selected, page, sort, dir]);
+  useEffect(() => {
+    if (propActiveTab && propActiveTab !== activeTab) {
+      setActiveTab(propActiveTab);
+    }
+  }, [propActiveTab]);
 
-  const columns = queryView?.columns || tableData?.columns || [];
-  const rows = queryView?.rows || tableData?.rows || [];
-  const primaryKeys = tableData?.primaryKeys || columns.filter((col) => col.primaryKey).map((col) => col.name);
-  const structure = schema?.tables?.[selected];
-  const total = queryView ? queryView.rows.length : (tableData?.total || 0);
-  const limit = tableData?.limit || 50;
-  const pageCount = Math.max(1, Math.ceil(total / limit));
+  const handleTabChange = (tab) => {
+    setActiveTab(tab);
+    propOnTabChange?.(tab);
+  };
 
-  const saveDrafts = async () => {
-    setBusy('Saving...');
-    setError('');
+  const handleSelectTable = (tbl) => {
+    setInternalSelectedTable(tbl);
+    propOnSelectTable?.(tbl);
+    setQueryView(null);
+    setPage(1);
+    setSearchQuery('');
+    setActiveFilters([]);
+    setDrafts({});
+    setSelectedRowKey('');
+    loadTable(tbl, 1, limit);
+  };
+
+  useEffect(() => {
+    if (propSelectedTable && propSelectedTable !== selectedTable) {
+      setInternalSelectedTable(propSelectedTable);
+      setQueryView(null);
+      setPage(1);
+      setSearchQuery('');
+      setActiveFilters([]);
+      setDrafts({});
+      setSelectedRowKey('');
+      loadTable(propSelectedTable, 1, limit);
+    }
+  }, [propSelectedTable]);
+
+  // ── Load Table Data from Server-side Endpoint ───────
+  const loadTable = useCallback(
+    async (tableName = selectedTable, targetPage = page, targetLimit = limit) => {
+      if (!tableName || !token) return;
+      setIsLoadingTable(true);
+      setTableError('');
+
+      try {
+        const params = new URLSearchParams({
+          page: String(targetPage),
+          limit: String(targetLimit),
+          sort: sortCol,
+          dir: sortDir,
+          q: searchQuery,
+        });
+
+        if (dbStatus.connectionId) {
+          params.set('connectionId', String(dbStatus.connectionId));
+        }
+
+        const res = await fetch(
+          `${API}/database/tables/${encodeURIComponent(tableName)}?${params}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+
+        if (res.status === 401) {
+          onAuthError?.('Session expired.');
+          return;
+        }
+
+        const data = await res.json();
+        if (!data.success) {
+          setTableError(data.error || 'Could not load this table.');
+          setTableData(null);
+        } else {
+          setTableData(data);
+          setQueryView(null);
+        }
+      } catch {
+        setTableError('Unable to load this table. The connection may have expired.');
+      } finally {
+        setIsLoadingTable(false);
+      }
+    },
+    [selectedTable, page, limit, sortCol, sortDir, searchQuery, token, dbStatus.connectionId, onAuthError]
+  );
+
+  useEffect(() => {
+    if (schema) return undefined;
+    loadSchema();
+    return undefined;
+  }, [token, dbStatus?.connectionId]);
+
+  useEffect(() => {
+    if (selectedTable && !queryView) {
+      loadTable(selectedTable, page, limit);
+    }
+  }, [selectedTable, page, limit, sortCol, sortDir]);
+
+  // ── Derived Data Elements & Filtering ───────────────
+  const rawColumns = queryView?.columns || tableData?.columns || [];
+  const rawRows = queryView?.rows || tableData?.rows || [];
+  const primaryKeys = tableData?.primaryKeys || rawColumns.filter((col) => col.primaryKey).map((col) => col.name);
+  const currentStructure = schema?.tables?.[selectedTable];
+
+  // Apply multi-filters to rows
+  const filteredRows = useMemo(() => {
+    if (!activeFilters || activeFilters.length === 0) return rawRows;
+
+    return rawRows.filter((row) => {
+      return activeFilters.every((filter) => {
+        const rowVal = row[filter.col];
+        if (rowVal === null || rowVal === undefined) return false;
+
+        const valStr = String(rowVal).toLowerCase();
+        const targetStr = String(filter.val).toLowerCase();
+        const valNum = Number(rowVal);
+        const targetNum = Number(filter.val);
+        const hasNumbers = !isNaN(valNum) && !isNaN(targetNum);
+
+        if (filter.op === 'equals') {
+          return hasNumbers ? valNum === targetNum : valStr === targetStr;
+        }
+        if (filter.op === 'not_equals') {
+          return hasNumbers ? valNum !== targetNum : valStr !== targetStr;
+        }
+        if (filter.op === 'contains') {
+          return valStr.includes(targetStr);
+        }
+        if (filter.op === 'gt') {
+          return hasNumbers ? valNum > targetNum : valStr > targetStr;
+        }
+        if (filter.op === 'lt') {
+          return hasNumbers ? valNum < targetNum : valStr < targetStr;
+        }
+        return true;
+      });
+    });
+  }, [rawRows, activeFilters]);
+
+  const totalRows = queryView ? queryView.rows.length : (activeFilters.length > 0 ? filteredRows.length : (tableData?.total || 0));
+
+  // ── Sorting Handler ─────────────────────────────────
+  const handleSort = (colName) => {
+    if (sortCol === colName) {
+      setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortCol(colName);
+      setSortDir('asc');
+    }
+    setPage(1);
+  };
+
+
+  // ── Column Visibility Toggle ────────────────────────
+  const handleToggleColumn = (colName) => {
+    setHiddenColumns((prev) => ({
+      ...prev,
+      [colName]: !prev[colName],
+    }));
+  };
+
+  // ── Filter Builder Handlers ─────────────────────────
+  const handleAddFilter = (newFilter) => {
+    setActiveFilters((prev) => [...prev, newFilter]);
+  };
+
+  const handleRemoveFilter = (index) => {
+    setActiveFilters((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleClearAllFilters = () => {
+    setActiveFilters([]);
+  };
+
+  // ── Cell Editing Change Handler ─────────────────────
+  const handleCellChange = (key, colName, newValue, originalValue) => {
+    setDrafts((prev) => {
+      const currentDraft = prev[key] || { original: {}, changes: {} };
+      const updatedOriginal = {
+        ...currentDraft.original,
+        [colName]: currentDraft.original[colName] !== undefined ? currentDraft.original[colName] : originalValue,
+      };
+      const updatedChanges = {
+        ...currentDraft.changes,
+        [colName]: newValue,
+      };
+
+      if (String(newValue) === String(updatedOriginal[colName] ?? '')) {
+        delete updatedChanges[colName];
+      }
+
+      if (Object.keys(updatedChanges).length === 0) {
+        const copy = { ...prev };
+        delete copy[key];
+        return copy;
+      }
+
+      return {
+        ...prev,
+        [key]: {
+          original: updatedOriginal,
+          changes: updatedChanges,
+        },
+      };
+    });
+  };
+
+  // ── Save All Draft Inline Changes ───────────────────
+  const handleSaveDrafts = async () => {
+    const draftEntries = Object.entries(drafts);
+    if (draftEntries.length === 0) return;
+
+    setIsSavingDrafts(true);
+    let successCount = 0;
+    let lastError = '';
+
     try {
-      for (const [key, draft] of Object.entries(drafts)) {
-        const row = rows.find((item) => rowKey(item, primaryKeys) === key);
-        if (!row) continue;
-        const primaryKey = {};
-        primaryKeys.forEach((col) => { primaryKey[col] = row[col]; });
+      for (const [key, draft] of draftEntries) {
+        const targetRow = rawRows.find((r) => rowKey(r, primaryKeys) === key);
+        if (!targetRow) continue;
+
+        const pkValues = {};
+        primaryKeys.forEach((pk) => {
+          pkValues[pk] = targetRow[pk];
+        });
+
         const res = await fetch(`${API}/database/rows`, {
           method: 'POST',
-          headers,
+          headers: authHeaders,
           body: JSON.stringify({
             connectionId: dbStatus.connectionId,
             action: 'update',
-            table: selected,
-            primaryKey,
+            table: selectedTable,
+            primaryKey: pkValues,
             changes: draft.changes,
           }),
         });
+
         const data = await res.json();
-        if (!data.success) throw new Error(data.error || 'Save failed.');
+        if (data.success) {
+          successCount += data.affectedRows || 1;
+        } else {
+          lastError = data.error || 'Update failed.';
+        }
       }
-      setDrafts({});
-      setEditing(null);
-      await loadTable(selected, page);
+
+      if (successCount > 0) {
+        toast.success(successCount === 1 ? '✓ Row updated successfully' : `✓ ${successCount} rows updated successfully`);
+        setDrafts({});
+        setAnalyticsRefresh((value) => value + 1);
+        await loadTable(selectedTable, page, limit);
+      }
+      if (lastError) {
+        toast.error(`Some updates could not be applied: ${lastError}`);
+      }
     } catch (err) {
-      setError(err.message);
+      toast.error(`Save failed: ${err.message}`);
     } finally {
-      setBusy('');
+      setIsSavingDrafts(false);
     }
   };
 
-  const insertRow = async () => {
-    setBusy('Inserting...');
-    setError('');
+  const handleCancelDrafts = () => {
+    setDrafts({});
+  };
+
+  // ── Insert New Row ──────────────────────────────────
+  const handleInsertRow = async (values) => {
+    setIsInsertingRow(true);
     try {
       const res = await fetch(`${API}/database/rows`, {
         method: 'POST',
-        headers,
+        headers: authHeaders,
         body: JSON.stringify({
           connectionId: dbStatus.connectionId,
           action: 'insert',
-          table: selected,
-          values: addValues,
+          table: selectedTable,
+          values,
         }),
       });
+
       const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Insert failed.');
-      setAddOpen(false);
-      setAddValues({});
-      await loadTable(selected, 1);
+      if (!data.success) {
+        throw new Error(data.error || 'Failed to insert row.');
+      }
+
+      toast.success('✓ 1 row inserted');
+      setIsAddRowOpen(false);
       setPage(1);
+      setAnalyticsRefresh((value) => value + 1);
+      await loadTable(selectedTable, 1, limit);
     } catch (err) {
-      setError(err.message);
+      toast.error(err.message);
     } finally {
-      setBusy('');
+      setIsInsertingRow(false);
     }
   };
 
-  const deleteRow = async () => {
-    if (!deleteTarget) return;
-    setBusy('Deleting...');
-    setError('');
+  // ── Delete Row ──────────────────────────────────────
+  const handleDeleteRow = async () => {
+    if (!deleteTargetRow) return;
+    setIsDeletingRow(true);
+
     try {
-      const primaryKey = {};
-      primaryKeys.forEach((col) => { primaryKey[col] = deleteTarget[col]; });
+      const pkValues = {};
+      primaryKeys.forEach((pk) => {
+        pkValues[pk] = deleteTargetRow[pk];
+      });
+
       const res = await fetch(`${API}/database/rows`, {
         method: 'POST',
-        headers,
+        headers: authHeaders,
         body: JSON.stringify({
           connectionId: dbStatus.connectionId,
           action: 'delete',
-          table: selected,
-          primaryKey,
+          table: selectedTable,
+          primaryKey: pkValues,
         }),
       });
+
       const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Delete failed.');
-      setDeleteTarget(null);
-      await loadTable(selected, page);
+      if (!data.success) {
+        throw new Error(data.error || 'Failed to delete row.');
+      }
+
+      toast.success('✓ 1 row deleted');
+      setDeleteTargetRow(null);
+      setAnalyticsRefresh((value) => value + 1);
+      await loadTable(selectedTable, page, limit);
     } catch (err) {
-      setError(err.message);
+      toast.error(err.message);
     } finally {
-      setBusy('');
+      setIsDeletingRow(false);
     }
   };
 
-  const askVendor = async (event) => {
-    event?.preventDefault();
-    const query = chat.trim();
-    if (!query || busy) return;
-    setChat('');
-    setMessages((list) => [...list, { role: 'you', text: query }]);
-    setBusy('Understanding request...');
-    setError('');
-    try {
-      const res = await fetch(`${API}/query`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          query,
-          currentTable: selected,
-          connectionId: dbStatus.connectionId,
-        }),
-      });
-      const data = await res.json();
-      if (data.type === 'conversation') {
-        setMessages((list) => [...list, { role: 'vendor', text: data.message }]);
-        setBusy('');
-        return;
-      }
-      if (data.type === 'confirmation_required') {
-        setPending(data);
-        setConfirmText('');
-        setMessages((list) => [...list, {
-          role: 'vendor',
-          text: `${data.intent} on ${data.targetTable || selected}. ${data.estimatedRows != null ? `${data.estimatedRows} row(s). ` : ''}Confirm before the database changes.`,
-        }]);
-        setBusy('');
-        return;
-      }
-      if (!data.success || data.type === 'operation_blocked' || data.type === 'no_match' || data.type === 'needs_disambiguation' || data.type === 'validation_error') {
-        setMessages((list) => [...list, { role: 'vendor', text: data.error || data.review?.reason || 'The request was blocked. No database changes were made.' }]);
-        setBusy('');
-        return;
-      }
-      if (data.type === 'query_result') {
-        setQueryView({
-          columns: (data.columns || []).map((name) => ({ name, type: 'text', primaryKey: false })),
-          rows: data.rows || [],
-        });
-        setMessages((list) => [...list, { role: 'vendor', text: `${data.rowCount ?? data.rows?.length ?? 0} rows returned.` }]);
-      }
-    } catch {
-      setMessages((list) => [...list, { role: 'vendor', text: 'The request could not be completed.' }]);
-    } finally {
-      setBusy('');
-    }
-  };
-
-  const confirmPending = async () => {
-    if (!pending?.operationId) return;
-    if (pending.confirmPhrase && confirmText.trim().toLowerCase() !== pending.confirmPhrase.toLowerCase()) {
-      setError(`Type "${pending.confirmPhrase}" to confirm.`);
+  // ── Export Dropdown Handlers (CSV / JSON) ───────────
+  const handleExportCSV = () => {
+    if (!filteredRows || filteredRows.length === 0) {
+      toast.warning('No data to export.');
       return;
     }
-    setBusy('Executing...');
-    try {
-      const res = await fetch(`${API}/query/confirm`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          operationId: pending.operationId,
-          confirmationText: confirmText,
-        }),
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'The database was not changed.');
-      setMessages((list) => [...list, { role: 'vendor', text: data.message || 'Database updated.' }]);
-      setPending(null);
-      setConfirmText('');
-      await loadSchema();
-      await loadTable(selected, page);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy('');
+
+    const visibleCols = rawColumns.filter((c) => !hiddenColumns[c.name]);
+    const headers = visibleCols.map((c) => `"${c.name.replace(/"/g, '""')}"`).join(',');
+    const csvRows = filteredRows.map((r) =>
+      visibleCols
+        .map((c) => {
+          const val = r[c.name];
+          if (val === null || val === undefined) return '""';
+          return `"${String(val).replace(/"/g, '""')}"`;
+        })
+        .join(',')
+    );
+
+    const csvContent = [headers, ...csvRows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `${selectedTable || 'export'}_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setExportDropdownOpen(false);
+    toast.success(`Exported ${filteredRows.length} rows to CSV`);
+  };
+
+  const handleExportJSON = () => {
+    if (!filteredRows || filteredRows.length === 0) {
+      toast.warning('No data to export.');
+      return;
+    }
+
+    const jsonContent = JSON.stringify(filteredRows, null, 2);
+    const blob = new Blob([jsonContent], { type: 'application/json;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `${selectedTable || 'export'}_${new Date().toISOString().slice(0, 10)}.json`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setExportDropdownOpen(false);
+    toast.success(`Exported ${filteredRows.length} rows to JSON`);
+  };
+
+  // ── Callback when @Intella executes modifications ───
+  const handleCopilotDatabaseModified = async (modifiedTable) => {
+    toast.success('✓ Database modified. Refreshing table...');
+    await loadSchema(modifiedTable);
+    setAnalyticsRefresh((value) => value + 1);
+    if (modifiedTable === selectedTable) {
+      await loadTable(selectedTable, page, limit);
     }
   };
 
-  const unsaved = Object.entries(drafts);
+  const unsavedCount = Object.keys(drafts).length;
+  const capitalizedTitle = selectedTable ? selectedTable.charAt(0).toUpperCase() + selectedTable.slice(1) : 'Table';
 
   return (
-    <div className="workspace">
-      <header className="workspace-top">
-        <strong>@vendor</strong>
-        <span className="workspace-db"><i /> {dbStatus.databaseName || 'Database'}</span>
-      </header>
-      <div className="workspace-body">
-        <aside className="workspace-tables">
-          <div className="workspace-label">TABLES</div>
-          <div className="workspace-db-name">▾ {dbStatus.databaseName || 'Database'}</div>
-          <ul>
-            {Object.keys(schema?.tables || {}).map((name) => (
-              <li key={name}>
-                <button
-                  type="button"
-                  className={name === selected && !queryView ? 'active' : ''}
-                  onClick={() => { setSelected(name); setPage(1); setQueryView(null); setTab('data'); setDrafts({}); }}
-                >
-                  {name}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </aside>
-        <section className="workspace-main">
-          <div className="workspace-title-row">
-            <h2>{queryView ? 'Query result' : (selected || 'Table')}</h2>
-            <div className="workspace-tabs">
-              <button type="button" className={tab === 'data' ? 'on' : ''} onClick={() => setTab('data')}>Data</button>
-              <button type="button" className={tab === 'structure' ? 'on' : ''} onClick={() => setTab('structure')}>Structure</button>
+    <div className="premium-workspace-viewport">
+      {/* ── Center Main Workspace (Flexible, fills vertical space) ── */}
+      <main className="premium-main-workspace">
+        {/* Main Workspace Header */}
+        <div className="workspace-main-header">
+          <div className="header-meta-stack">
+            {onOpenMobileSidebar && (
+              <button
+                type="button"
+                className="workspace-mobile-menu-btn"
+                onClick={onOpenMobileSidebar}
+                title="Open navigation menu"
+                aria-label="Open navigation menu"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="3" y1="12" x2="21" y2="12" />
+                  <line x1="3" y1="6" x2="21" y2="6" />
+                  <line x1="3" y1="18" x2="21" y2="18" />
+                </svg>
+              </button>
+            )}
+
+            <div className="title-and-metadata-line">
+              <h2 className="workspace-current-table-title">{capitalizedTitle}</h2>
+              <div className="workspace-db-context-meta">
+                <span>{dbStatus.dbType || 'PostgreSQL'}</span>
+                <span className="dot-separator">·</span>
+                <span>{selectedTable || 'table'}</span>
+                <span className="dot-separator">·</span>
+                <span className="row-count-emphasis">{totalRows.toLocaleString()} rows</span>
+              </div>
             </div>
-            <button type="button" className="workspace-refresh" onClick={() => { setQueryView(null); loadTable(selected, page); }}>Refresh</button>
-            <button type="button" className="workspace-add" onClick={() => setAddOpen(true)}>+ Add Row</button>
+
+            {/* Segmented Control Tabs */}
+            <div className="segmented-tab-control" role="tablist">
+              <button
+                type="button"
+                className={`segmented-tab-button ${activeTab === 'data' ? 'is-active' : ''}`}
+                onClick={() => setActiveTab('data')}
+                role="tab"
+                aria-selected={activeTab === 'data'}
+              >
+                Data
+              </button>
+              <button
+                type="button"
+                className={`segmented-tab-button ${activeTab === 'analytics' ? 'is-active' : ''}`}
+                onClick={() => setActiveTab('analytics')}
+                role="tab"
+                aria-selected={activeTab === 'analytics'}
+              >
+                Analytics
+              </button>
+              <button
+                type="button"
+                className={`segmented-tab-button ${activeTab === 'structure' ? 'is-active' : ''}`}
+                onClick={() => setActiveTab('structure')}
+                role="tab"
+                aria-selected={activeTab === 'structure'}
+              >
+                Structure
+              </button>
+            </div>
           </div>
 
-          <div className="workspace-tools">
-            <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter" />
-            <button type="button" onClick={() => { setPage(1); loadTable(selected, 1); }}>Apply</button>
-            <span>{loading ? 'Loading...' : `${total} rows`}</span>
-            <button type="button" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>Prev</button>
-            <span>{page} / {pageCount}</span>
-            <button type="button" disabled={page >= pageCount} onClick={() => setPage((p) => p + 1)}>Next</button>
-          </div>
+          {/* Actions Cluster: Refresh, Export Dropdown, Primary + Add Row, Copilot Drawer Toggle */}
+          <div className="workspace-header-actions-group">
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => {
+                setQueryView(null);
+                loadTable(selectedTable, page, limit);
+              }}
+              title="Refresh table data"
+            >
+              ↻ Refresh
+            </button>
 
-          {error && <div className="workspace-error">{error}</div>}
-          {busy && <div className="workspace-busy">{busy}</div>}
-
-          {unsaved.length > 0 && (
-            <div className="workspace-unsaved">
-              <strong>Unsaved change</strong>
-              {unsaved.map(([key, draft]) => (
-                <div key={key}>
-                  {Object.entries(draft.changes).map(([col, value]) => (
-                    <span key={col}>{col}: {draft.original[col]} → {value}</span>
-                  ))}
+            {/* Export Dropdown */}
+            <div className="relative-dropdown-wrap">
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setExportDropdownOpen(!exportDropdownOpen)}
+              >
+                <span>Export</span>
+                <span className="dropdown-caret">▾</span>
+              </button>
+              {exportDropdownOpen && (
+                <div className="dropdown-panel export-dropdown-panel">
+                  <button
+                    type="button"
+                    className="dropdown-item"
+                    onClick={handleExportCSV}
+                  >
+                    Export as CSV (.csv)
+                  </button>
+                  <button
+                    type="button"
+                    className="dropdown-item"
+                    onClick={handleExportJSON}
+                  >
+                    Export as JSON (.json)
+                  </button>
                 </div>
-              ))}
-              <button type="button" onClick={() => { setDrafts({}); setEditing(null); }}>Cancel</button>
-              <button type="button" onClick={saveDrafts}>Save</button>
-            </div>
-          )}
-
-          {tab === 'structure' && structure && (
-            <div className="workspace-scroll">
-              <table className="workspace-grid">
-                <thead>
-                  <tr><th>Column</th><th>Type</th><th>Nullable</th><th>Key</th></tr>
-                </thead>
-                <tbody>
-                  {Object.entries(structure.columns || {}).map(([name, type]) => (
-                    <tr key={name}>
-                      <td>{name}</td>
-                      <td>{type}</td>
-                      <td>{structure.nullable?.[name] === false ? 'NO' : 'YES'}</td>
-                      <td>{(structure.primaryKeys || []).includes(name) ? 'PK' : ''}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {tab === 'data' && (
-            <div className="workspace-scroll">
-              <table className="workspace-grid">
-                <thead>
-                  <tr>
-                    {columns.map((col) => (
-                      <th key={col.name}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setDir(sort === col.name && dir === 'asc' ? 'desc' : 'asc');
-                            setSort(col.name);
-                          }}
-                        >
-                          {col.name}
-                        </button>
-                      </th>
-                    ))}
-                    <th />
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((row) => {
-                    const key = rowKey(row, primaryKeys);
-                    return (
-                      <tr key={key} className={selectedRow === key ? 'selected' : ''} onClick={() => setSelectedRow(key)}>
-                        {columns.map((col) => {
-                          const shown = drafts[key]?.changes?.[col.name] ?? row[col.name];
-                          const isEdit = editing?.key === key && editing?.col === col.name;
-                          return (
-                            <td key={col.name} onClick={() => !col.primaryKey && !queryView && setEditing({ key, col: col.name, value: shown ?? '' })}>
-                              {isEdit ? (
-                                <input
-                                  value={editing.value}
-                                  autoFocus
-                                  onChange={(e) => setEditing({ ...editing, value: e.target.value })}
-                                  onBlur={() => {
-                                    if (String(editing.value) !== String(row[col.name] ?? '')) {
-                                      setDrafts((current) => ({
-                                        ...current,
-                                        [key]: {
-                                          original: { ...(current[key]?.original || {}), [col.name]: row[col.name] },
-                                          changes: { ...(current[key]?.changes || {}), [col.name]: editing.value },
-                                        },
-                                      }));
-                                    }
-                                    setEditing(null);
-                                  }}
-                                />
-                              ) : (shown === null || shown === undefined ? 'NULL' : String(shown))}
-                            </td>
-                          );
-                        })}
-                        <td>
-                          <button type="button" onClick={() => setMenu(menu === key ? null : key)}>⋮</button>
-                          {menu === key && (
-                            <div className="workspace-menu">
-                              <button type="button" onClick={() => { setEditing({ key, col: columns.find((col) => !col.primaryKey)?.name, value: '' }); setMenu(null); }}>Edit</button>
-                              <button type="button" onClick={() => { setDeleteTarget(row); setMenu(null); }}>Delete</button>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {rows.length === 0 && !loading && (
-                    <tr><td colSpan={Math.max(columns.length + 1, 1)}>No rows</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {addOpen && (
-            <div className="workspace-panel">
-              <strong>Add row to {selected}</strong>
-              {(columns.length ? columns : Object.keys(structure?.columns || {}).map((name) => ({ name, primaryKey: (structure?.primaryKeys || []).includes(name) })))
-                .filter((col) => !col.primaryKey)
-                .map((col) => (
-                  <label key={col.name}>
-                    {col.name}
-                    <input value={addValues[col.name] || ''} onChange={(e) => setAddValues({ ...addValues, [col.name]: e.target.value })} />
-                  </label>
-                ))}
-              <div>
-                <button type="button" onClick={() => setAddOpen(false)}>Cancel</button>
-                <button type="button" onClick={insertRow}>Insert Row</button>
-              </div>
-            </div>
-          )}
-
-          {deleteTarget && (
-            <div className="workspace-panel danger">
-              <strong>Delete Row</strong>
-              <p>This permanently deletes the selected row.</p>
-              {primaryKeys.concat(columns.map((col) => col.name).filter((name) => !primaryKeys.includes(name)).slice(0, 2)).map((col) => (
-                <div key={col}>{col}: {String(deleteTarget[col] ?? '')}</div>
-              ))}
-              <div>
-                <button type="button" onClick={() => setDeleteTarget(null)}>Cancel</button>
-                <button type="button" onClick={deleteRow}>Delete</button>
-              </div>
-            </div>
-          )}
-
-          {pending && (
-            <div className={`workspace-panel ${pending.confirmPhrase ? 'danger' : ''}`}>
-              <strong>{pending.confirmPhrase ? 'Critical operation' : 'Database modification'}</strong>
-              <p>{pending.intent} on {pending.targetTable}. Risk: {pending.riskLevel}. {pending.estimatedRows != null ? `${pending.estimatedRows} row(s).` : ''}</p>
-              <pre>{pending.sql}</pre>
-              {pending.confirmPhrase && (
-                <input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder={pending.confirmPhrase} />
               )}
-              <div>
-                <button type="button" onClick={() => setPending(null)}>Cancel</button>
-                <button type="button" onClick={confirmPending}>Confirm {pending.intent}</button>
-              </div>
             </div>
-          )}
 
-          <form className="vendor-chat" onSubmit={askVendor}>
-            <div className="vendor-context">@vendor · Context: {selected || 'database'}</div>
-            <div className="vendor-log">
-              {messages.slice(-6).map((item, index) => (
-                <p key={`${item.role}-${index}`}><b>{item.role === 'you' ? 'You' : '@vendor'}</b> {item.text}</p>
-              ))}
+            {/* Primary Action Button: + Add Row */}
+            <button
+              type="button"
+              className="btn btn-primary btn-sm add-row-primary-action"
+              onClick={() => setIsAddRowOpen(true)}
+            >
+              + Add Row
+            </button>
+
+            {/* AI Copilot Drawer Toggle */}
+            <button
+              type="button"
+              className={`btn btn-sm copilot-drawer-toggle-btn ${isCopilotOpen ? 'active' : ''}`}
+              onClick={() => setIsCopilotOpen(!isCopilotOpen)}
+              title={isCopilotOpen ? 'Hide Intella' : 'Open Intella'}
+              aria-label={isCopilotOpen ? 'Hide Intella' : 'Open Intella'}
+            >
+              <span>Intella</span>
+              <span className="copilot-toggle-arrow">{isCopilotOpen ? '▸' : '◂'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Unsaved Changes Banner */}
+        {unsavedCount > 0 && (
+          <div className="unsaved-changes-floating-bar" role="alert">
+            <div className="unsaved-info">
+              <span className="unsaved-dot">●</span>
+              <span>
+                <strong>{unsavedCount}</strong> unsaved {unsavedCount === 1 ? 'row edit' : 'row edits'}
+              </span>
             </div>
-            <input
-              value={chat}
-              onChange={(e) => setChat(e.target.value)}
-              placeholder={selected ? `Ask anything about ${selected}...` : 'Ask your database...'}
+            <div className="unsaved-actions">
+              <button
+                type="button"
+                className="btn btn-secondary btn-xs"
+                onClick={handleCancelDrafts}
+                disabled={isSavingDrafts}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-xs"
+                onClick={handleSaveDrafts}
+                disabled={isSavingDrafts}
+              >
+                {isSavingDrafts ? 'Saving...' : 'Save Changes'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Stage Error Alert */}
+        {tableError && (
+          <div className="table-stage-error-banner" role="alert">
+            <span className="error-icon">✕</span>
+            <div className="error-text-content">
+              <strong>Unable to load table:</strong> {tableError}
+            </div>
+            <button
+              type="button"
+              className="btn btn-secondary btn-xs"
+              onClick={() => loadTable(selectedTable, page, limit)}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {/* ── Tab 1: DATA EXPLORER ── */}
+        {activeTab === 'data' && (
+          <div className="workspace-tab-stage-view">
+            <TableToolbar
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+              onApplySearch={() => {
+                setPage(1);
+                loadTable(selectedTable, 1, limit);
+              }}
+              onRefresh={() => loadTable(selectedTable, page, limit)}
+              onOpenAddRow={() => setIsAddRowOpen(true)}
+              columns={rawColumns}
+              hiddenColumns={hiddenColumns}
+              onToggleColumn={handleToggleColumn}
+              activeFilters={activeFilters}
+              onAddFilter={handleAddFilter}
+              onRemoveFilter={handleRemoveFilter}
+              onClearAllFilters={handleClearAllFilters}
             />
-          </form>
-        </section>
-      </div>
+
+            {/* Flexible table viewport container */}
+            <div className="table-container-full-viewport">
+              <TableView
+                columns={rawColumns}
+                rows={filteredRows}
+                primaryKeys={primaryKeys}
+                hiddenColumns={hiddenColumns}
+                sortCol={sortCol}
+                sortDir={sortDir}
+                onSort={handleSort}
+                isLoading={isLoadingTable}
+                selectedRowKey={selectedRowKey}
+                onSelectRow={(key) => setSelectedRowKey(key)}
+                onOpenDeleteRow={(row) => setDeleteTargetRow(row)}
+                drafts={drafts}
+                onCellChange={handleCellChange}
+                isReadOnly={Boolean(queryView)}
+                onResetFilter={() => {
+                  setSearchQuery('');
+                  setActiveFilters([]);
+                  setPage(1);
+                  loadTable(selectedTable, 1, limit);
+                }}
+              />
+            </div>
+
+            {/* Sticky bottom pagination */}
+            {!queryView && (
+              <TablePagination
+                page={page}
+                limit={limit}
+                total={totalRows}
+                onPageChange={(nextPage) => {
+                  setPage(nextPage);
+                  loadTable(selectedTable, nextPage, limit);
+                }}
+                onLimitChange={(newLimit) => {
+                  setLimit(newLimit);
+                  setPage(1);
+                  loadTable(selectedTable, 1, newLimit);
+                }}
+                isLoading={isLoadingTable}
+              />
+            )}
+          </div>
+        )}
+
+        {/* ── Tab 2: ANALYTICS DASHBOARD ── */}
+        {activeTab === 'analytics' && (
+          <div className="workspace-tab-stage-view">
+            <AnalyticsDashboard
+              token={token}
+              tableName={selectedTable}
+              connectionId={dbStatus?.connectionId}
+              refreshKey={analyticsRefresh}
+              enabled={activeTab === 'analytics'}
+              onAuthError={onAuthError}
+            />
+          </div>
+        )}
+
+        {/* ── Tab 3: STRUCTURE EXPLORER ── */}
+        {activeTab === 'structure' && (
+          <div className="workspace-tab-stage-view">
+            <TableStructure
+              structure={currentStructure}
+              tableName={selectedTable}
+            />
+          </div>
+        )}
+      </main>
+
+      {/* ── 3. Right Intella panel ── */}
+      <VendorChat
+        token={token}
+        dbStatus={dbStatus}
+        currentTable={selectedTable}
+        schema={schema}
+        user={user}
+        onApplyQueryResult={(res) => {
+          setQueryView(res);
+          setActiveTab('data');
+        }}
+        onDatabaseModified={handleCopilotDatabaseModified}
+        onAuthError={onAuthError}
+        isOpen={isCopilotOpen}
+        onClose={() => setIsCopilotOpen(false)}
+      />
+
+      {/* ── Add Row Modal ── */}
+      {isAddRowOpen && (
+        <AddRowModal
+          tableName={selectedTable}
+          columns={rawColumns}
+          structure={currentStructure}
+          onClose={() => setIsAddRowOpen(false)}
+          onInsert={handleInsertRow}
+          isInserting={isInsertingRow}
+        />
+      )}
+
+      {/* ── Delete Row Confirmation Modal ── */}
+      {deleteTargetRow && (
+        <DeleteRowModal
+          tableName={selectedTable}
+          row={deleteTargetRow}
+          primaryKeys={primaryKeys}
+          columns={rawColumns}
+          onClose={() => setDeleteTargetRow(null)}
+          onDelete={handleDeleteRow}
+          isDeleting={isDeletingRow}
+        />
+      )}
     </div>
   );
 }
