@@ -54,115 +54,214 @@ function detectWriteIntent(question) {
  * @param {object} tableSchema - { columns: { colName: colType } }
  * @returns {object} - { colName: value }
  */
-function extractValues(question, tableSchema) {
-  const q = question;
-  const values = {};
+const INSERT_COMMAND_WORDS = new Set([
+  'insert', 'add', 'create', 'register', 'put', 'save', 'store', 'include',
+  'the', 'a', 'an', 'row', 'rows', 'record', 'records', 'entry', 'of', 'into',
+  'please', 'give', 'with', 'to', 'in', 'from', 'and', 'new', 'named', 'called', 'set',
+  'values', 'value', 'table',
+]);
+
+function formatTextValue(raw) {
+  const text = String(raw || '').trim().replace(/^['"]|['"]$/g, '').trim();
+  if (/^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(text)) return text;
+  if (/^null$/i.test(text)) return null;
+  return text.split(/\s+/).filter(Boolean).map((word) => {
+    if (/^[a-z]{2,4}$/.test(word)) return word.toUpperCase();
+    if (word === word.toLowerCase()) return word.charAt(0).toUpperCase() + word.slice(1);
+    return word;
+  }).join(' ');
+}
+
+function parseNumericExpression(raw) {
+  const text = String(raw || '')
+    .trim()
+    .replace(/[₹$,]/g, '')
+    .replace(/\s+rupees?$/i, '')
+    .trim();
+  const match = text.match(/^(\d+(?:\.\d+)?)\s*(cr|crores?|lakhs?|lacs?|millions?|thousand|k)?$/i);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount)) return null;
+  const unit = (match[2] || '').toLowerCase();
+  if (unit === 'cr' || unit.startsWith('crore')) return amount * 10000000;
+  if (unit.startsWith('lakh') || unit.startsWith('lac')) return amount * 100000;
+  if (unit.startsWith('million')) return amount * 1000000;
+  if (unit === 'k' || unit === 'thousand') return amount * 1000;
+  return amount;
+}
+
+function isAutoColumn(col, tableSchema) {
+  const type = String(tableSchema.columns?.[col] || '').toLowerCase();
+  const defaults = tableSchema.defaults || {};
+  const identity = tableSchema.identity || {};
+  const defaultValue = defaults[col] == null ? '' : String(defaults[col]);
+  if (identity[col]) return true;
+  if (/nextval|serial|identity/i.test(defaultValue) || type.includes('serial')) return true;
+  const primaryKeys = tableSchema.primaryKeys || [];
+  return primaryKeys.includes(col) && (col === 'id' || /int|serial/.test(type));
+}
+
+function columnHasDefault(col, tableSchema) {
+  const defaults = tableSchema.defaults || {};
+  return defaults[col] != null && String(defaults[col]).trim() !== '';
+}
+
+function insertableColumns(tableSchema, options = {}) {
+  return Object.keys(tableSchema.columns || {}).filter((col) => {
+    if (isAutoColumn(col, tableSchema)) return false;
+    if (!options.includeDefaults && columnHasDefault(col, tableSchema)) return false;
+    return true;
+  });
+}
+
+function columnLabels(tableSchema) {
+  const labels = [];
   const columns = tableSchema.columns || {};
+  for (const col of Object.keys(columns)) {
+    if (isAutoColumn(col, tableSchema)) continue;
+    labels.push({ label: col.replace(/_/g, ' '), col });
+    if (col.includes('_')) labels.push({ label: col, col });
+    if (/email/i.test(col)) {
+      labels.push({ label: 'contact email', col });
+      labels.push({ label: 'email', col });
+    }
+    if (/^name$/i.test(col) || /_name$/i.test(col)) {
+      labels.push({ label: 'named', col });
+      labels.push({ label: 'called', col });
+    }
+    if (isNumericType(columns[col]) && /value|amount|price|cost|budget|salary|revenue/i.test(col)) {
+      labels.push({ label: 'contract value', col });
+      labels.push({ label: 'budget', col });
+      labels.push({ label: 'amount', col });
+    }
+  }
+  const seen = new Set();
+  return labels
+    .filter((item) => {
+      const key = `${item.label.toLowerCase()}|${item.col}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => b.label.length - a.label.length);
+}
 
-  // Extract quoted strings first → attribute to most likely column
-  const quotedPairs = [];
-  const quotedRegex = /['"]([\w\s]+)['"]/g;
-  let m;
-  while ((m = quotedRegex.exec(q)) !== null) {
-    quotedPairs.push(m[1].trim());
+function stripInsertCommand(question, tableName) {
+  let text = String(question || '').trim();
+  text = text.replace(/^(please\s+)/i, '');
+  text = text.replace(/^(insert|add|create|register|put|save|store|include)\s+/i, '');
+  text = text.replace(/^(?:a|an|the)\s+/i, '');
+  text = text.replace(/^(?:row|record|entry|new)\s+/i, '');
+  text = text.replace(/^(?:of|into|to|in)\s+/i, '');
+  if (tableName) {
+    const singular = tableName.replace(/s$/, '');
+    text = text.replace(new RegExp(`\\b(?:to|into|in|from|a|an|the)?\\s*(${escapeRegex(tableName)}|${escapeRegex(singular)})\\b`, 'ig'), ' ');
+  }
+  text = text.replace(/\s+/g, ' ').trim();
+  text = text.replace(/^(?:named|called)\s+/i, '');
+  return text.trim();
+}
+
+function splitValuePieces(segment) {
+  const text = segment.trim().replace(/^['"]|['"]$/g, '').trim();
+  if (!text) return [];
+  const email = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  if (email && email[0].length === text.length) return [text];
+  const currency = text.match(/^(.+?)\s+((?:₹\s*)?\d+(?:\.\d+)?\s*(?:cr|crores?|lakhs?|lacs?|millions?|thousand|k)\b(?:\s+rupees)?)$/i);
+  if (currency) return [currency[1].trim(), currency[2].trim()];
+  return [text];
+}
+
+function classifyInsertPiece(piece) {
+  const text = String(piece || '').trim().replace(/^['"]|['"]$/g, '').trim();
+  if (/^null$/i.test(text)) return 'null';
+  if (/^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(text)) return 'email';
+  if (parseNumericExpression(text) != null && /\d/.test(text)) return 'number';
+  return 'text';
+}
+
+function coerceInsertValue(raw, col, tableSchema) {
+  const text = String(raw || '').trim().replace(/^['"]|['"]$/g, '').trim();
+  if (/^null$/i.test(text)) {
+    if (tableSchema.nullable && tableSchema.nullable[col] === false) {
+      throw new Error(`Column "${col}" does not allow NULL.`);
+    }
+    return null;
+  }
+  if (isNumericType(tableSchema.columns[col])) {
+    const amount = parseNumericExpression(text);
+    if (amount == null) {
+      throw new Error(`"${text}" is not a valid number for column "${col}".`);
+    }
+    return amount;
+  }
+  return formatTextValue(text);
+}
+
+function extractValues(question, tableSchema, tableName = '') {
+  const labels = columnLabels(tableSchema);
+  let payload = stripInsertCommand(question, tableName);
+  const explicit = {};
+
+  for (const item of labels) {
+    const pattern = new RegExp(`(?:^|\\s)(?:with\\s+)?${escapeRegex(item.label)}\\s*[:=]?\\s+((?:['"][^'"]+['"])|.+?)(?=\\s*,|\\s+and\\s+|\\s+with\\s+|$)`, 'i');
+    const found = payload.match(pattern);
+    if (!found || item.col in explicit) continue;
+    explicit[item.col] = coerceInsertValue(found[1], item.col, tableSchema);
+    payload = payload.replace(found[0], ' ');
   }
 
-  // "Add Rahul with mark 85" — leading proper name, not a table word
-  const addNameMatch = q.match(/\b(?:add|insert|register)\s+([A-Za-z][A-Za-z]{1,40})\b/i);
-  if (addNameMatch) {
-    const rawCandidate = addNameMatch[1];
-    const candidate = rawCandidate.charAt(0).toUpperCase() + rawCandidate.slice(1);
-    const skipped = /^(student|students|record|row|user|employee|employees)$/i.test(candidate);
-    if (!skipped) {
-      for (const col of Object.keys(columns)) {
-        if (/name/i.test(col) && !(col in values)) {
-          values[col] = candidate;
-          break;
-        }
-      }
+  const segments = payload.split(/\s*,\s*|\s+\band\b\s+/i).map((part) => part.trim()).filter(Boolean);
+  const positional = [];
+  for (const segment of segments) {
+    for (const piece of splitValuePieces(segment)) {
+      if (INSERT_COMMAND_WORDS.has(piece.toLowerCase())) continue;
+      positional.push(piece);
     }
   }
 
-  const fromValue = q.match(/\bfrom\s+([A-Za-z][A-Za-z0-9]{1,20})\b/i);
-  if (fromValue && !/^(the|table|database)$/i.test(fromValue[1])) {
-    for (const col of Object.keys(columns)) {
-      if (/department/i.test(col) && !(col in values)) {
-        const token = fromValue[1];
-        values[col] = token === token.toUpperCase() ? token : token.charAt(0).toUpperCase() + token.slice(1);
-        break;
-      }
-    }
+  const values = { ...explicit };
+  const pieces = positional.map((piece) => ({
+    piece,
+    kind: classifyInsertPiece(piece),
+    used: false,
+  }));
+
+  function openColumns(predicate, includeDefaults) {
+    return insertableColumns(tableSchema, { includeDefaults }).filter((col) => !(col in values) && predicate(col));
   }
 
-  // Pattern: "named <value>", "called <value>", "name <value>"
-  const namedMatch = q.match(/\b(?:named?|called?)\s+([A-Za-z][A-Za-z0-9\s_-]{0,40}?)(?=\s+(?:with|to|in|from|at|and|\d)|$)/i);
-  if (namedMatch) {
-    // Find a 'name' column
-    for (const col of Object.keys(columns)) {
-      if (/name/i.test(col)) {
-        const rawVal = namedMatch[1].trim();
-        // Capitalize proper name
-        values[col] = rawVal.charAt(0).toUpperCase() + rawVal.slice(1);
-        break;
-      }
-    }
+  function assignKind(kind, predicate) {
+    const queue = pieces.filter((item) => !item.used && item.kind === kind);
+    const cols = openColumns(predicate, true);
+    if (queue.length === 0 || cols.length === 0 || queue.length > cols.length) return;
+    queue.forEach((item, index) => {
+      values[cols[index]] = coerceInsertValue(item.piece, cols[index], tableSchema);
+      item.used = true;
+    });
   }
 
-  // Pattern: "with <colname> <value>" or "<colname> <value>"
-  for (const [col, colType] of Object.entries(columns)) {
-    if (col === 'id' || col.endsWith('_id')) continue;
+  assignKind('email', (col) => /email/i.test(col) && !isNumericType(tableSchema.columns[col]));
+  assignKind('number', (col) => isNumericType(tableSchema.columns[col]));
 
-    const colWords = col.replace(/_/g, ' ');
-    const colSingular = col.replace(/s$/, '');
-    const isNumeric = isNumericType(colType);
-
-    if (isNumeric) {
-      // Number extraction: "with mark 85", "mark=85", "mark: 85", "mark of 85"
-      const numPatterns = [
-        new RegExp(`\\b(?:with\\s+)?(?:${escapeRegex(col)}|${escapeRegex(colWords)}|${escapeRegex(colSingular)})\\s*[=:of]?\\s*(\\d+(?:\\.\\d+)?)\\b`, 'i'),
-        new RegExp(`\\b(\\d+(?:\\.\\d+)?)\\s+(?:${escapeRegex(col)}|${escapeRegex(colWords)})\\b`, 'i'),
-      ];
-      for (const pattern of numPatterns) {
-        const nm = q.match(pattern);
-        if (nm && !(col in values)) {
-          values[col] = parseFloat(nm[1]);
-          break;
-        }
-      }
-    } else {
-      // String extraction: "with department 'CSE'", "to department cse"
-      const strPatterns = [
-        new RegExp(`\\b(?:with\\s+)?(?:${escapeRegex(col)}|${escapeRegex(colWords)}|${escapeRegex(colSingular)})\\s+['\"]?([A-Za-z][\\w\\s]{0,40}?)['\"]?(?=\\s+(?:with|and|to|from|at)\\b|$)`, 'i'),
-        new RegExp(`\\bto\\s+(?:${escapeRegex(col)}|${escapeRegex(colWords)})\\s+['\"]?([A-Za-z][\\w\\s]{0,40}?)['\"]?(?=\\s|$)`, 'i'),
-      ];
-      for (const pattern of strPatterns) {
-        const sm = q.match(pattern);
-        if (sm && !(col in values)) {
-          const val = sm[1].trim().replace(/['"]/g, '');
-          if (val.length > 0 && !/^(with|and|to|from|at|in|the|a)$/i.test(val)) {
-            values[col] = val.charAt(0).toUpperCase() + val.slice(1);
-          }
-          break;
-        }
-      }
-    }
+  const remainingPieces = pieces.filter((item) => !item.used);
+  const remainingColumns = openColumns(() => true, false);
+  if (remainingPieces.length > remainingColumns.length) {
+    throw new Error(
+      `I found ${remainingPieces.length} values (${remainingPieces.map((item) => item.piece).join(', ')}) that do not fit the remaining columns: ${remainingColumns.join(', ')}.`
+    );
   }
+  remainingPieces.forEach((item, index) => {
+    const col = remainingColumns[index];
+    values[col] = coerceInsertValue(item.piece, col, tableSchema);
+  });
 
-  // Merge quoted values if we haven't already covered them
-  if (quotedPairs.length > 0) {
-    for (const qVal of quotedPairs) {
-      // Try to map to a column not yet set
-      for (const [col, colType] of Object.entries(columns)) {
-        if (col in values || col === 'id' || col.endsWith('_id')) continue;
-        if (!isNumericType(colType)) {
-          values[col] = qVal;
-          break;
-        }
-      }
-    }
-  }
+  const missing = insertableColumns(tableSchema).filter((col) => {
+    if (col in values) return false;
+    return tableSchema.nullable && tableSchema.nullable[col] === false;
+  });
 
-  return values;
+  return { values, missing };
 }
 
 /**
@@ -343,9 +442,24 @@ function extractSetValues(question, tableSchema) {
  * @param {string} dbType
  * @returns {{ sql: string, values: object, warnings: string[] }}
  */
+function sqlLiteral(value) {
+  if (value === null) return 'NULL';
+  if (typeof value === 'number') return String(value);
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
 function buildInsertSQL(question, targetTable, tableSchema, dbType = 'postgres') {
   const warnings = [];
-  const values = extractValues(question, tableSchema);
+  const extracted = extractValues(question, tableSchema, targetTable);
+  const values = extracted.values || extracted;
+
+  if (extracted.missing && extracted.missing.length > 0) {
+    const known = Object.entries(values).map(([col, value]) => `${col} '${value}'`).join(', ');
+    const missingList = extracted.missing.map((col) => `- ${col}`).join('\n');
+    throw new Error(
+      `I have ${known || 'part of this row'}, but these required fields are missing:\n${missingList}\nPlease provide them.`
+    );
+  }
 
   if (Object.keys(values).length === 0) {
     throw new Error(`Could not extract column values for INSERT into "${targetTable}". Please specify values like "add a student named Rahul with mark 85".`);
@@ -359,8 +473,9 @@ function buildInsertSQL(question, targetTable, tableSchema, dbType = 'postgres')
     }
   }
 
-  const cols = Object.keys(values);
-  const vals = Object.values(values);
+  const columnOrder = insertableColumns(tableSchema, { includeDefaults: true });
+  const cols = columnOrder.filter((col) => col in values);
+  const vals = cols.map((col) => values[col]);
 
   let sql;
   if (dbType === 'postgres') {
@@ -376,13 +491,22 @@ function buildInsertSQL(question, targetTable, tableSchema, dbType = 'postgres')
   }
 
   // Readable SQL with actual values (for preview)
-  const readableParts = cols.map((col, i) => {
-    const v = vals[i];
-    return typeof v === 'string' ? `'${v}'` : String(v);
-  });
+  const readableParts = vals.map((value) => sqlLiteral(value));
   const readableSQL = `INSERT INTO ${targetTable} (${cols.join(', ')})\nVALUES (${readableParts.join(', ')});`;
 
-  return { sql: readableSQL, paramSql: sql, params: vals, values, warnings };
+  const orderedValues = {};
+  cols.forEach((col, index) => {
+    orderedValues[col] = vals[index];
+  });
+
+  return {
+    sql: readableSQL,
+    paramSql: sql,
+    params: vals,
+    values: orderedValues,
+    columnValues: orderedValues,
+    warnings,
+  };
 }
 
 /**
@@ -625,6 +749,7 @@ function generateMutationPlan(question, schema, dbType = 'postgres') {
       intent,
       targetTable,
       sql: result.sql,
+      columnValues: result.columnValues || result.values || null,
       riskLevel: 'NORMAL',
       warnings: result.warnings || [],
       hasWhereClause: true, // INSERT doesn't need WHERE
@@ -882,4 +1007,5 @@ module.exports = {
   executeWriteSQL,
   estimateAffectedRows,
   findTargetTable,
+  parseNumericExpression,
 };

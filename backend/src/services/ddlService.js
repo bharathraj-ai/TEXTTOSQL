@@ -53,7 +53,7 @@ function detectDDLIntent(question) {
 /**
  * Extract target table name for DDL operation.
  */
-function extractDDLTargetTable(question, schema = null) {
+function extractDDLTargetTable(question, schema = null, currentTable = null) {
   const q = (question || '').trim();
 
   // Pattern: "drop the <tableName> table" or "drop <tableName> table"
@@ -96,7 +96,32 @@ function extractDDLTargetTable(question, schema = null) {
     }
   }
 
-  return 'new_table';
+  const current = String(currentTable || '').trim();
+  if (!current || !schema?.tables) return null;
+  if (schema.tables[current]) return current;
+  return Object.keys(schema.tables).find((name) => name.toLowerCase() === current.toLowerCase()) || null;
+}
+
+function extractAddedColumn(question) {
+  const patterns = [
+    /\badd\s+(?:an?\s+)?(?:new\s+)?column\s+(?:called\s+|named\s+)?["'`]?([a-zA-Z_][a-zA-Z0-9_]*)/i,
+    /\badd\s+(?:an?\s+)?(?:new\s+)?["'`]?([a-zA-Z_][a-zA-Z0-9_]*)["'`]?\s+column\b/i,
+  ];
+  const skipped = new Set(['column', 'table', 'the', 'a', 'an', 'of', 'to', 'in', 'on', 'for', 'new']);
+  for (const pattern of patterns) {
+    const match = question.match(pattern);
+    if (match && !skipped.has(match[1].toLowerCase())) return match[1].toLowerCase();
+  }
+  return null;
+}
+
+function columnSqlType(colName, dbType) {
+  if (/date|time|timing|timestamp/i.test(colName)) {
+    return dbType === 'sqlite' ? 'DATETIME' : 'TIMESTAMP';
+  }
+  if (/int|number|count/i.test(colName)) return 'INTEGER';
+  if (/salary|price|amount|mark|value/i.test(colName)) return 'NUMERIC(10, 2)';
+  return 'VARCHAR(255)';
 }
 
 /**
@@ -114,13 +139,19 @@ function extractDDLTargetTable(question, schema = null) {
  *   requiresConfirmation: true
  * }}
  */
-function generateDDLPlan(question, schema = null, dbType = 'postgres') {
+function generateDDLPlan(question, schema = null, dbType = 'postgres', currentTable = null) {
   const intent = detectDDLIntent(question);
   if (!intent) {
     throw new Error('No recognizable DDL operation found in question.');
   }
 
-  const targetTable = extractDDLTargetTable(question, schema);
+  const targetTable = extractDDLTargetTable(question, schema, currentTable);
+  if (!targetTable) {
+    throw new Error('I could not tell which table this applies to. Select a table or name it, for example: add column timing to vendors.');
+  }
+  if (intent === 'ALTER' && schema?.tables && !schema.tables[targetTable]) {
+    throw new Error(`Table "${targetTable}" does not exist.`);
+  }
   const q = question.toLowerCase();
   const warnings = [];
 
@@ -159,14 +190,14 @@ function generateDDLPlan(question, schema = null, dbType = 'postgres') {
     riskLevel = 'HIGH';
     warnings.push(`This will modify the schema of table "${targetTable}".`);
 
-    // Check for add column: e.g. "add email column to employees"
-    const addColMatch = question.match(/\badd\s+(?:an?\s+)?([a-zA-Z0-9_]+)\s+column\b/i);
-    const colName = addColMatch ? addColMatch[1].toLowerCase() : 'new_column';
-
-    let colType = 'VARCHAR(255)';
-    if (/int|number|count/i.test(colName)) colType = 'INTEGER';
-    if (/salary|price|amount|mark/i.test(colName)) colType = 'NUMERIC(10, 2)';
-    if (/date|time/i.test(colName)) colType = dbType === 'sqlite' ? 'DATETIME' : 'TIMESTAMP';
+    const colName = extractAddedColumn(question);
+    if (!colName) {
+      throw new Error('I could not tell which column to add. Try: add column timing to vendors.');
+    }
+    if (schema?.tables?.[targetTable]?.columns?.[colName]) {
+      throw new Error(`Column "${colName}" already exists on "${targetTable}".`);
+    }
+    const colType = columnSqlType(colName, dbType);
 
     sql = `ALTER TABLE ${targetTable} ADD COLUMN ${colName} ${colType};`;
   } else if (intent === 'DROP') {

@@ -464,9 +464,16 @@ function validateSecurity(query, dbType = 'postgres') {
  * @param {string} [mode='read'] - 'read' (SELECT only) or 'write' (SELECT+INSERT+UPDATE+DELETE)
  * @returns {{ valid: boolean, layer?: number, error?: string }}
  */
-function validateQuery(query, schema = null, dbType = 'postgres', mode = 'read') {
+function sqlHasWhereClause(sql) {
+  const withoutLiterals = String(sql || '')
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""');
+  return /\bWHERE\b/i.test(withoutLiterals);
+}
+
+function validateQuery(query, schema = null, dbType = 'postgres', mode = 'read', options = {}) {
   if (mode === 'write') {
-    return validateQueryWrite(query, schema, dbType);
+    return validateQueryWrite(query, schema, dbType, options);
   }
   if (mode === 'ddl') {
     return validateQueryDDL(query, schema, dbType);
@@ -498,7 +505,7 @@ function validateQuery(query, schema = null, dbType = 'postgres', mode = 'read')
 /**
  * Write-mode validation: allows SELECT + DML (INSERT/UPDATE/DELETE) but blocks DDL.
  */
-function validateQueryWrite(query, schema, dbType) {
+function validateQueryWrite(query, schema, dbType, options = {}) {
   const clean = stripComments(query || '');
 
   // Multi-statement block
@@ -571,6 +578,14 @@ function validateQueryWrite(query, schema, dbType) {
         error: `Table "${targetTable}" does not exist. Available tables: ${Array.from(knownTables).join(', ')}.`,
       };
     }
+  }
+
+  if ((firstWord === 'UPDATE' || firstWord === 'DELETE') && !sqlHasWhereClause(stmt) && !options.allowMass) {
+    return {
+      valid: false,
+      layer: 3,
+      error: `${firstWord} without a WHERE clause is not allowed. Name the rows to change, or explicitly request a mass ${firstWord.toLowerCase()}.`,
+    };
   }
 
   return { valid: true };
@@ -667,5 +682,6 @@ module.exports = {
   validateQueryDDL,
   validateSQL,
   validateMongoQuery,
+  sqlHasWhereClause,
   extractAllTableReferences,
 };

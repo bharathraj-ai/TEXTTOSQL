@@ -7,13 +7,14 @@
 
 require('dotenv').config();
 const { Pool } = require('pg');
+const { safeErrorMessage } = require('../utils/safeLog');
 
 function formatDbError(err) {
   if (!err) return 'Unknown error';
   if (err.errors && Array.isArray(err.errors)) {
-    return err.errors.map(e => e.message || e.code).join('; ') || err.message || err.code;
+    return safeErrorMessage(err.errors.map((e) => e.message || e.code).join('; ') || err.message || err.code);
   }
-  return err.message || err.code || String(err);
+  return safeErrorMessage(err.message || err.code || String(err));
 }
 
 const appDbUrl = process.env.APP_DATABASE_URL || process.env.DATABASE_URL;
@@ -62,7 +63,20 @@ async function initAppDatabase(retries = 2, delayMs = 2000) {
           );
         `);
 
-        console.log('✅ Application database tables verified (users, database_connections)');
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS openrouter_usage (
+            id SERIAL PRIMARY KEY,
+            "date" DATE NOT NULL UNIQUE,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_usd NUMERIC(14, 8) NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+
+        console.log('✅ Application database tables verified (users, database_connections, openrouter_usage)');
         return;
       } finally {
         client.release();

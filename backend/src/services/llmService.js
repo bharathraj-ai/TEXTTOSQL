@@ -17,6 +17,8 @@
 //   - Generates schema-aware query suggestions
 //   - Corrects failed SQL using levenshtein matching
 
+const { logSafeSql, safeErrorMessage } = require('../utils/safeLog');
+
 // ── Secret Detection Patterns ─────────────────────────
 const SECRET_PATTERNS = [
   'password', 'api key', 'api_key', 'apikey', 'secret',
@@ -54,17 +56,17 @@ function generateSQL(question, schema, intents = [], dbType = 'postgres') {
   // ── Step 2: Detect raw query input ──────────────────
   if (dbType === 'mongodb') {
     if (trimmed.startsWith('db.')) {
-      console.log(`[SLM] Direct MongoDB MQL detected: "${trimmed}"`);
+      logSafeSql('[SLM] Direct MongoDB MQL detected:', trimmed);
       return trimmed;
     }
   } else if (isRawSQL(trimmed)) {
-    console.log(`[SLM] Direct SQL detected: "${trimmed}"`);
+    logSafeSql('[SLM] Direct SQL detected:', trimmed);
     return trimmed.endsWith(';') ? trimmed : `${trimmed};`;
   }
 
   // ── Step 3: Extract schema entities from question ───
   const entities = extractSchemaEntities(q, schema);
-  console.log(`[SLM] Entities:`, JSON.stringify(entities, null, 0));
+  console.log(`[SLM] Entities: tables=${(entities.matchedTables || []).join(',') || '(none)'} target=${entities.targetTable || ''} agg=${entities.aggregateFunction || ''}`);
 
   // ── Step 4: Build query from intents + entities ──────
   let query;
@@ -745,6 +747,16 @@ function buildWhereClause(q, entities, tableInfo, table, schema, dbType = 'postg
     }
   }
 
+  for (const col of columns) {
+    const names = [col, col.replace(/_/g, ' ')].map((name) => escapeRegex(name)).join('|');
+    const columnSql = formatIdentifier(col, dbType);
+    if (new RegExp(`\\b(?:${names})\\s+is\\s+not\\s+null\\b`, 'i').test(q)) {
+      conditions.push(`${columnSql} IS NOT NULL`);
+    } else if (new RegExp(`\\b(?:${names})\\s+is\\s+null\\b`, 'i').test(q)) {
+      conditions.push(`${columnSql} IS NULL`);
+    }
+  }
+
   // ── String filter ───────────────────────────────────
   if (entities.stringValues.length > 0) {
     for (const val of entities.stringValues) {
@@ -982,7 +994,7 @@ function findBestGroupByColumn(q, schema, targetTable, matchedColumns) {
   const groupKeywords = [
     'department', 'category', 'status', 'type', 'city', 'country',
     'region', 'month', 'year', 'state', 'group', 'class', 'level',
-    'brand', 'vendor', 'supplier', 'channel',
+    'brand', 'Intellaa', 'supplier', 'channel',
   ];
 
   // Check if any group keyword appears in the question AND matches a column
@@ -1124,7 +1136,7 @@ function findIndirectJoin(table1, table2, schema, alias1) {
  */
 function correctSQL(originalQuestion, failedSQL, dbError, schema, dbType = 'postgres') {
   console.log(`[SLM] Attempting SQL correction...`);
-  console.log(`[SLM] Error: ${dbError}`);
+  console.log(`[SLM] Error: ${safeErrorMessage(dbError)}`);
 
   // ── Column does not exist ───────────────────────────
   const colNotExist = dbError.match(/column "(\w+)" does not exist/i);

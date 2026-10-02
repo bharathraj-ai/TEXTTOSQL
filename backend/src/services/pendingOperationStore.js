@@ -40,6 +40,7 @@ function createPendingOperation({
   userId = null,
   dbType = 'postgres',
   confirmPhrase = null,
+  allowMass = false,
 }) {
   if (!sql || typeof sql !== 'string') {
     throw new Error('Valid SQL statement is required to create a pending operation.');
@@ -59,6 +60,8 @@ function createPendingOperation({
     userId: userId !== undefined && userId !== null ? String(userId) : null,
     dbType: dbType || 'postgres',
     confirmPhrase: confirmPhrase || null,
+    allowMass: Boolean(allowMass),
+    status: 'PENDING',
     createdAt: now,
     expiresAt: now + OPERATION_TTL_MS,
   });
@@ -89,43 +92,87 @@ function getPendingOperation(operationId) {
   return { ...op };
 }
 
+function authorizeOperation(op, requestingUserId) {
+  const reqUid = requestingUserId !== undefined && requestingUserId !== null ? String(requestingUserId) : null;
+  if (op.userId !== null && op.userId !== reqUid) {
+    return { success: false, statusCode: 403, error: 'Operation not authorized for this user.' };
+  }
+  return null;
+}
+
 /**
- * Consume a pending operation upon confirmation.
- * Enforces user isolation: The requesting user must match the operation's creator.
- * Once consumed, the operation is immediately removed from the store to prevent replay attacks.
- *
- * @param {string} operationId
- * @param {number|string|null} requestingUserId
- * @returns {{ success: boolean, operation?: object, error?: string }}
+ * Claim a stored operation for execution.
+ * PENDING and FAILED can be claimed. SUCCESS cannot be run again.
+ * EXECUTING cannot be claimed a second time.
+ * The stored SQL is never replaced by the caller.
  */
-function consumePendingOperation(operationId, requestingUserId = null) {
+function claimPendingOperation(operationId, requestingUserId = null) {
   if (!operationId || typeof operationId !== 'string') {
-    return { success: false, error: 'Operation ID is required for confirmation.' };
+    return { success: false, statusCode: 400, error: 'Operation ID is required for confirmation.' };
   }
 
   const op = pendingOperations.get(operationId);
   if (!op) {
-    return { success: false, error: 'Operation not found or already executed.' };
+    return { success: false, statusCode: 400, error: 'Operation not found or already executed.' };
   }
 
-  if (Date.now() > op.expiresAt) {
-    pendingOperations.delete(operationId);
-    return { success: false, error: 'Confirmation window has expired (5 minutes). Please stage the operation again.' };
+  if (Date.now() > op.expiresAt || op.status === 'EXPIRED') {
+    op.status = 'EXPIRED';
+    return { success: false, statusCode: 400, error: 'Confirmation window has expired (5 minutes). Please stage the operation again.' };
   }
 
-  // User isolation check. A stored user must match the confirmer.
-  const reqUid = requestingUserId !== undefined && requestingUserId !== null ? String(requestingUserId) : null;
-  if (op.userId !== null && op.userId !== reqUid) {
-    return { success: false, error: 'Operation not authorized for this user.' };
+  const unauthorized = authorizeOperation(op, requestingUserId);
+  if (unauthorized) return unauthorized;
+
+  if (op.status === 'SUCCESS') {
+    return { success: false, statusCode: 400, error: 'This operation already ran and cannot be executed again.' };
+  }
+  if (op.status === 'EXECUTING') {
+    return { success: false, statusCode: 409, error: 'This operation is already executing.' };
+  }
+  if (op.status === 'CANCELLED') {
+    return { success: false, statusCode: 400, error: 'This operation was cancelled.' };
+  }
+  if (op.status !== 'PENDING' && op.status !== 'FAILED') {
+    return { success: false, statusCode: 400, error: 'This operation cannot be executed.' };
   }
 
-  // Atomically delete operation to prevent replay
-  pendingOperations.delete(operationId);
+  op.status = 'EXECUTING';
+  return { success: true, operation: { ...op } };
+}
 
-  return {
-    success: true,
-    operation: op,
-  };
+function completePendingOperation(operationId) {
+  const op = pendingOperations.get(operationId);
+  if (!op || op.status !== 'EXECUTING') return false;
+  op.status = 'SUCCESS';
+  return true;
+}
+
+function failPendingOperation(operationId) {
+  const op = pendingOperations.get(operationId);
+  if (!op || op.status !== 'EXECUTING') return false;
+  op.status = 'FAILED';
+  return true;
+}
+
+function cancelPendingOperation(operationId, requestingUserId = null) {
+  const op = pendingOperations.get(operationId);
+  if (!op) return { success: false, error: 'Operation not found.' };
+  const unauthorized = authorizeOperation(op, requestingUserId);
+  if (unauthorized) return unauthorized;
+  if (op.status === 'SUCCESS' || op.status === 'EXECUTING') {
+    return { success: false, error: 'This operation can no longer be cancelled.' };
+  }
+  op.status = 'CANCELLED';
+  return { success: true };
+}
+
+/**
+ * Backward-compatible claim. Does not delete the operation.
+ * A second claim fails while the first claim is EXECUTING or after SUCCESS.
+ */
+function consumePendingOperation(operationId, requestingUserId = null) {
+  return claimPendingOperation(operationId, requestingUserId);
 }
 
 /**
@@ -143,6 +190,10 @@ function pruneExpiredOperations() {
 module.exports = {
   createPendingOperation,
   getPendingOperation,
+  claimPendingOperation,
+  completePendingOperation,
+  failPendingOperation,
+  cancelPendingOperation,
   consumePendingOperation,
   pruneExpiredOperations,
 };

@@ -6,10 +6,9 @@
 // Caches adapter instances, verifies connectivity, and encrypts URLs.
 
 const appPool = require('../db/applicationDatabase');
-const defaultPool = require('../db/database');
 const { encrypt, decrypt } = require('../utils/encryption');
+const { safeErrorMessage } = require('../utils/safeLog');
 const { createAdapter, detectDatabaseType } = require('../adapters/databaseAdapter');
-const { PostgresAdapter } = require('../adapters/postgresAdapter');
 const { invalidateUserSchemaCache } = require('./schemaService');
 const { invalidateUserCache } = require('./queryCache');
 
@@ -17,14 +16,10 @@ const { invalidateUserCache } = require('./queryCache');
 // Key: userId -> Value: { adapter, connectionName, databaseName, host, dbType }
 const userAdapters = new Map();
 
-// Default system adapter (PostgreSQL)
-let defaultSystemAdapter = null;
-function getDefaultAdapter() {
-  if (!defaultSystemAdapter) {
-    const defaultUrl = process.env.DATABASE_URL || 'postgresql://localhost:5432/postgres';
-    defaultSystemAdapter = new PostgresAdapter(defaultUrl);
-  }
-  return defaultSystemAdapter;
+function connectionError(message, statusCode) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
 }
 
 /**
@@ -86,22 +81,22 @@ async function testRawConnection(rawUrl) {
       dbType,
     };
   } catch (err) {
-    throw new Error(`Database connection failed: ${err.message}`);
+    throw new Error('Database connection failed. Check the connection URL and try again.');
   } finally {
     await adapter.close().catch(() => {});
   }
 }
 
 /**
- * Get active database adapter for a specific user.
- * Falls back to default system PostgreSQL adapter if no user connection is configured.
- * 
- * @param {number|string} userId 
+ * Get the database adapter saved for this user.
+ * Never falls back to the application DATABASE_URL.
+ *
+ * @param {number|string} userId
  * @returns {Promise<object>} Database adapter instance
  */
 async function getUserAdapter(userId) {
   if (!userId) {
-    return getDefaultAdapter();
+    throw connectionError('Authentication required.', 401);
   }
 
   const uid = Number(userId);
@@ -118,7 +113,7 @@ async function getUserAdapter(userId) {
   );
 
   if (res.rows.length === 0) {
-    return getDefaultAdapter();
+    throw connectionError('No database is connected for this account. Connect a database before running queries.', 400);
   }
 
   const { connection_name, encrypted_url } = res.rows[0];
@@ -126,8 +121,8 @@ async function getUserAdapter(userId) {
   try {
     rawUrl = decrypt(encrypted_url);
   } catch (err) {
-    console.error(`[CONN] Failed to decrypt connection for user ${uid}:`, err.message);
-    return getDefaultAdapter();
+    console.error(`[CONN] Failed to decrypt connection for user ${uid}`);
+    throw connectionError('Saved database connection could not be read. Connect the database again.', 400);
   }
 
   const adapter = createAdapter(rawUrl);
@@ -311,7 +306,7 @@ async function getUserStatus(userId) {
       createdAt: row.created_at,
     };
   } catch (err) {
-    console.error(`[CONN] Status check error for user ${uid}:`, err.message);
+    console.error(`[CONN] Status check error for user ${uid}: ${safeErrorMessage(err)}`);
     return {
       connected: false,
       error: 'Failed to access saved database connection.',

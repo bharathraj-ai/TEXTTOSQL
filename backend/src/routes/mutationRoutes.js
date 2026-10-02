@@ -6,29 +6,14 @@
 // Client-supplied SQL is ignored.
 
 const express = require('express');
-const jwt = require('jsonwebtoken');
 const { getReviewLogs } = require('../services/auditService');
 const { reviewSQL } = require('../services/sqlReviewService');
 const { stageNaturalLanguageOperation } = require('../services/operationPipeline');
 const { confirmAndExecuteOperation } = require('../services/confirmationService');
+const authMiddleware = require('../middleware/authMiddleware');
 
 const router = express.Router();
-
-const JWT_SECRET = process.env.JWT_SECRET || 'nl_sql_jwt_secret_key_super_secure_2026_production_v2';
-
-function extractUserId(req) {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    try {
-      const token = authHeader.split(' ')[1];
-      const decoded = jwt.verify(token, JWT_SECRET);
-      return decoded.id;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
+router.use(authMiddleware);
 
 function sendResult(res, result) {
   const statusCode = result.statusCode || (result.success ? 200 : 400);
@@ -52,7 +37,7 @@ router.post('/mutation/stage', async (req, res) => {
       });
     }
 
-    const userId = extractUserId(req);
+    const userId = req.user.id;
     const result = await stageNaturalLanguageOperation(question, userId, {
       currentTable: req.body?.currentTable,
       connectionId: req.body?.connectionId,
@@ -95,7 +80,7 @@ router.post('/mutation/confirm', async (req, res) => {
       });
     }
 
-    const userId = extractUserId(req);
+    const userId = req.user.id;
     const result = await confirmAndExecuteOperation({
       operationId: operationId || null,
       confirmationToken: operationId ? null : confirmationToken,
@@ -127,7 +112,7 @@ router.post('/review', async (req, res) => {
       });
     }
 
-    const userId = extractUserId(req);
+    const userId = req.user.id;
     const review = await reviewSQL({
       naturalLanguageQuery: naturalLanguageQuery || '',
       generatedSQL,
@@ -155,7 +140,7 @@ router.post('/review', async (req, res) => {
  */
 router.get('/audit/reviews', async (req, res) => {
   try {
-    const userId = extractUserId(req);
+    const userId = req.user.id;
     const limit = parseInt(req.query.limit || '50', 10);
     const logs = getReviewLogs({ userId, limit });
     return res.json({

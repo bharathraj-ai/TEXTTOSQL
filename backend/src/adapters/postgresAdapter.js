@@ -93,7 +93,8 @@ class PostgresAdapter {
           t.table_name,
           c.column_name,
           c.data_type,
-          c.is_nullable
+          c.is_nullable,
+          c.column_default
         FROM information_schema.tables t
         JOIN information_schema.columns c
           ON t.table_name = c.table_name
@@ -109,11 +110,19 @@ class PostgresAdapter {
           schema.tables[tableName] = {
             columns: {},
             nullable: {},
+            defaults: {},
+            identity: {},
             primaryKeys: [],
           };
         }
         schema.tables[tableName].columns[row.column_name] = row.data_type;
         schema.tables[tableName].nullable[row.column_name] = row.is_nullable === 'YES';
+        if (row.column_default) {
+          schema.tables[tableName].defaults[row.column_name] = row.column_default;
+          if (/nextval|identity/i.test(row.column_default)) {
+            schema.tables[tableName].identity[row.column_name] = true;
+          }
+        }
       }
 
       // Primary keys

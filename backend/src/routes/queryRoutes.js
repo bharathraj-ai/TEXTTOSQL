@@ -10,28 +10,10 @@ const express = require('express');
 const { processNaturalLanguageQuery, processClarifiedQuery, getQuerySuggestions, previewQuery } = require('../services/queryService');
 const { getAuditLogs } = require('../services/auditService');
 const { confirmAndExecuteOperation } = require('../services/confirmationService');
+const authMiddleware = require('../middleware/authMiddleware');
 
 const router = express.Router();
-
-const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'nl_sql_jwt_secret_key_super_secure_2026_production_v2';
-
-/**
- * Extract userId from Bearer token (optional auth).
- */
-function extractUserId(req) {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    try {
-      const token = authHeader.split(' ')[1];
-      const decoded = jwt.verify(token, JWT_SECRET);
-      return decoded.id;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
+router.use(authMiddleware);
 
 /**
  * POST /api/query
@@ -49,7 +31,7 @@ router.post('/query', async (req, res) => {
       });
     }
 
-    const userId = extractUserId(req);
+    const userId = req.user.id;
     const result = await processNaturalLanguageQuery(question, userId, {
       currentTable: req.body?.currentTable,
       connectionId: req.body?.connectionId,
@@ -96,7 +78,7 @@ router.post('/query/confirm', async (req, res) => {
       });
     }
 
-    const userId = extractUserId(req);
+    const userId = req.user.id;
     const result = await confirmAndExecuteOperation({
       operationId: operationId || null,
       confirmationToken: operationId ? null : confirmationToken,
@@ -126,7 +108,7 @@ router.post('/query/preview', async (req, res) => {
     if (!question || typeof question !== 'string' || question.trim().length === 0) {
       return res.status(400).json({ success: false, error: 'Question is required for preview.' });
     }
-    const userId = extractUserId(req);
+    const userId = req.user.id;
     const result = await previewQuery(question, userId);
     return res.json(result);
   } catch (err) {
@@ -151,7 +133,7 @@ router.post('/query/clarify', async (req, res) => {
       });
     }
 
-    const userId = extractUserId(req);
+    const userId = req.user.id;
     const result = await processClarifiedQuery(originalQuestion, selectedOption, userId);
 
     const statusCode = result.success ? 200 : 400;
@@ -173,7 +155,7 @@ router.post('/query/clarify', async (req, res) => {
  */
 router.get('/query/suggestions', async (req, res) => {
   try {
-    const userId = extractUserId(req);
+    const userId = req.user.id;
     const suggestions = await getQuerySuggestions(userId);
 
     return res.json({
@@ -195,7 +177,7 @@ router.get('/query/suggestions', async (req, res) => {
  */
 router.get('/query/audit', async (req, res) => {
   try {
-    const userId = extractUserId(req);
+    const userId = req.user.id;
     const logs = getAuditLogs({ userId, limit: 50 });
     return res.json({ success: true, logs });
   } catch (err) {

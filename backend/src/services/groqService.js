@@ -12,8 +12,36 @@
 //   5. GROQ_API_KEY is read from environment and never hardcoded or logged.
 
 const GROQ_API_URL = process.env.GROQ_URL || 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
-const GROQ_TIMEOUT_MS = parseInt(process.env.GROQ_TIMEOUT_MS || '5000', 10);
+const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-20b';
+const RETIRED_GROQ_MODELS = {
+  'llama-3.3-70b-versatile': DEFAULT_GROQ_MODEL,
+  'llama-3.1-8b-instant': DEFAULT_GROQ_MODEL,
+};
+
+function resolveGroqModel() {
+  const configured = String(process.env.GROQ_MODEL || DEFAULT_GROQ_MODEL).trim() || DEFAULT_GROQ_MODEL;
+  const replacement = RETIRED_GROQ_MODELS[configured];
+  if (replacement) {
+    console.warn(`[GROQ] Configured model ${configured} is retired. Using ${replacement}.`);
+    return replacement;
+  }
+  return configured;
+}
+
+function groqTimeoutMs() {
+  const timeout = parseInt(process.env.GROQ_TIMEOUT_MS || '15000', 10);
+  return Number.isFinite(timeout) && timeout > 0 ? timeout : 15000;
+}
+
+function safeProviderError(err) {
+  const secret = String(process.env.GROQ_API_KEY || '');
+  let text = String(err && err.message ? err.message : err || 'Groq request failed');
+  if (secret) text = text.split(secret).join('[redacted]');
+  return text
+    .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[redacted]')
+    .slice(0, 180);
+}
 
 const SYSTEM_CONVERSATION_PROMPT = `You are the friendly, professional conversational assistant for an enterprise Natural Language to SQL & Multi-Database platform.
 Your role:
@@ -62,9 +90,10 @@ function getLocalConversationalFallback(message) {
  */
 async function handleConversation(userMessage) {
   const apiKey = process.env.GROQ_API_KEY || '';
+  const model = resolveGroqModel();
 
   if (!apiKey || apiKey.trim().length === 0) {
-    console.log('[GROQ] GROQ_API_KEY not configured. Serving local conversational response.');
+    console.log('[GROQ] LOCAL FALLBACK: GROQ_API_KEY is not configured.');
     return {
       success: true,
       message: getLocalConversationalFallback(userMessage),
@@ -73,49 +102,69 @@ async function handleConversation(userMessage) {
   }
 
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
+    let lastError = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), groqTimeoutMs());
+      try {
+        const response = await fetch(GROQ_API_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: 'system', content: SYSTEM_CONVERSATION_PROMPT },
+              { role: 'user', content: String(userMessage || '').slice(0, 2000) },
+            ],
+            temperature: 0.6,
+            max_tokens: 300,
+          }),
+          signal: controller.signal,
+        });
 
-    const response = await fetch(GROQ_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        messages: [
-          { role: 'system', content: SYSTEM_CONVERSATION_PROMPT },
-          { role: 'user', content: userMessage },
-        ],
-        temperature: 0.6,
-        max_tokens: 300,
-      }),
-      signal: controller.signal,
-    });
+        if (!response.ok) {
+          const error = new Error(`Groq API returned HTTP ${response.status}`);
+          error.status = response.status;
+          throw error;
+        }
 
-    clearTimeout(timer);
+        const data = await response.json();
+        const reply = data?.choices?.[0]?.message?.content?.trim();
+        if (!reply) {
+          throw new Error('Empty message content returned from Groq.');
+        }
 
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      throw new Error(`Groq API returned HTTP ${response.status}: ${errText.slice(0, 100)}`);
+        console.log(`[GROQ] PROVIDER RESPONSE model=${model}`);
+        return {
+          success: true,
+          message: reply,
+          source: 'groq',
+          model,
+        };
+      } catch (err) {
+        lastError = err;
+        const retryable = err.name === 'AbortError' || err.status === 429;
+        if (retryable && attempt === 0) {
+          console.warn('[GROQ] Provider attempt timed out or was rate limited. Retrying once.');
+          continue;
+        }
+        break;
+      } finally {
+        clearTimeout(timer);
+      }
     }
 
-    const data = await response.json();
-    const reply = data?.choices?.[0]?.message?.content?.trim();
-
-    if (!reply) {
-      throw new Error('Empty message content returned from Groq.');
-    }
-
+    console.warn(`[GROQ] LOCAL FALLBACK after provider failure: ${safeProviderError(lastError)}`);
     return {
       success: true,
-      message: reply,
-      source: 'groq',
-      model: GROQ_MODEL,
+      message: getLocalConversationalFallback(userMessage),
+      source: 'local_fallback',
     };
   } catch (err) {
-    console.warn(`[GROQ] Request failed or timed out: ${err.message}. Using graceful fallback.`);
+    console.warn(`[GROQ] LOCAL FALLBACK after provider failure: ${safeProviderError(err)}`);
     return {
       success: true,
       message: getLocalConversationalFallback(userMessage),
@@ -124,6 +173,15 @@ async function handleConversation(userMessage) {
   }
 }
 
+function groqConfiguration() {
+  return {
+    configured: Boolean(process.env.GROQ_API_KEY && String(process.env.GROQ_API_KEY).trim()),
+    model: resolveGroqModel(),
+  };
+}
+
 module.exports = {
   handleConversation,
+  groqConfiguration,
+  getLocalConversationalFallback,
 };

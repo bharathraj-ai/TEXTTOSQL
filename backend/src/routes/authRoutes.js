@@ -10,18 +10,19 @@ const jwt = require('jsonwebtoken');
 const appPool = require('../db/applicationDatabase');
 const authMiddleware = require('../middleware/authMiddleware');
 const { blacklistToken, pruneExpiredTokens } = require('../utils/tokenBlacklist');
+const { getJwtSecret } = require('../config/requiredSecrets');
 
 const router = express.Router();
-
-// Fail fast if JWT_SECRET is not configured
-if (!process.env.JWT_SECRET) {
-  console.warn('[AUTH ROUTES] WARNING: JWT_SECRET not set. Authentication security is degraded.');
-}
-const JWT_SECRET = process.env.JWT_SECRET || 'nl_sql_jwt_secret_key_super_secure_2026_production_v2';
 const TOKEN_EXPIRY = '7d';
 
 // Periodically prune expired tokens from blacklist (every 4 hours)
-setInterval(() => pruneExpiredTokens(JWT_SECRET), 4 * 60 * 60 * 1000);
+setInterval(() => {
+  try {
+    pruneExpiredTokens(getJwtSecret());
+  } catch (err) {
+    console.error(`[AUTH] Could not prune expired tokens: ${err.message}`);
+  }
+}, 4 * 60 * 60 * 1000);
 
 /**
  * Helper: Generate JWT token for user
@@ -29,7 +30,7 @@ setInterval(() => pruneExpiredTokens(JWT_SECRET), 4 * 60 * 60 * 1000);
 function generateToken(user) {
   return jwt.sign(
     { id: user.id, email: user.email, name: user.name },
-    JWT_SECRET,
+    getJwtSecret(),
     { expiresIn: TOKEN_EXPIRY }
   );
 }
@@ -172,7 +173,7 @@ router.post('/logout', async (req, res) => {
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.split(' ')[1];
       try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded = jwt.verify(token, getJwtSecret());
         if (decoded?.id) {
           await cleanupUserSession(decoded.id);
         }

@@ -52,6 +52,8 @@ const DDL_PATTERNS = [
 // DML (Data Manipulation Language) modification patterns
 const DML_PATTERNS = [
   /^(insert|update|delete)\b/i,
+  /^(?:please\s+)?(?:add|insert|register)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:row|record|entry)\b/i,
+  /\b(?:add|insert)\s+(?:a\s+|an\s+|the\s+)?(?:row|record|entry)\s+of\b/i,
   /\binsert\s+into\b/i,
   /\bdelete\s+from\b/i,
   /\b(add|insert|register|enroll|record|save|create\s+a\s+new|new)\s+[a-zA-Z0-9_]+\s+(named?|with|in)\b/i,
@@ -96,18 +98,9 @@ function classifyQuery(input) {
   const q = input.trim();
   const lower = q.toLowerCase();
 
-  // 1. Check for Conversational / Greeting
-  for (const pattern of GREETING_PATTERNS) {
-    if (pattern.test(lower)) {
-      return {
-        category: QUERY_CATEGORIES.CONVERSATION,
-        confidence: 0.95,
-        reason: 'Detected conversational greeting or general assistance request.',
-      };
-    }
-  }
-
-  // 2. Check for DDL operations
+  // Database intent is checked before greetings so "Hi, show students"
+  // stays on the SQL pipeline. A greeting alone stays conversational.
+  // 1. Check for DDL operations
   for (const pattern of DDL_PATTERNS) {
     if (pattern.test(lower)) {
       return {
@@ -118,7 +111,7 @@ function classifyQuery(input) {
     }
   }
 
-  // 3. Check for Database Modification (DML)
+  // 2. Check for Database Modification (DML)
   for (const pattern of DML_PATTERNS) {
     if (pattern.test(q)) {
       return {
@@ -129,13 +122,23 @@ function classifyQuery(input) {
     }
   }
 
-  // 4. Check for Database Query (SELECT)
+  // 3. Check for Database Query (SELECT)
   for (const pattern of READ_QUERY_PATTERNS) {
     if (pattern.test(lower)) {
       return {
         category: QUERY_CATEGORIES.DATABASE_QUERY,
         confidence: 0.90,
         reason: 'Detected data retrieval query.',
+      };
+    }
+  }
+
+  for (const pattern of GREETING_PATTERNS) {
+    if (pattern.test(lower)) {
+      return {
+        category: QUERY_CATEGORIES.CONVERSATION,
+        confidence: 0.95,
+        reason: 'Detected conversational greeting or general assistance request.',
       };
     }
   }

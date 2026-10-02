@@ -86,26 +86,26 @@ async function main() {
     const afterDirect = await marks(adapter);
     check('direct edit writes 95 into the sqlite file', afterDirect.some((row) => row.name === 'Ravi' && Number(row.mark) === 95), JSON.stringify(afterDirect));
 
-    const vendorUpdate = await stageNaturalLanguageOperation("@vendor change Ravi's mark to 88", USER_ID, { currentTable: 'students' });
-    check('vendor update is staged, not executed yet', vendorUpdate.type === 'confirmation_required' && /UPDATE/i.test(vendorUpdate.sql), vendorUpdate.sql || vendorUpdate.error);
+    const IntellaUpdate = await stageNaturalLanguageOperation("@Intella change Ravi's mark to 88", USER_ID, { currentTable: 'students' });
+    check('Intella update is staged, not executed yet', IntellaUpdate.type === 'confirmation_required' && /UPDATE/i.test(IntellaUpdate.sql), IntellaUpdate.sql || IntellaUpdate.error);
     const still95 = await marks(adapter);
     check('database still has 95 before confirmation', still95.some((row) => row.name === 'Ravi' && Number(row.mark) === 95));
-    const updateResult = await confirm(vendorUpdate);
-    const afterVendor = await marks(adapter);
-    check('confirmed vendor update writes 88', updateResult.success && afterVendor.some((row) => row.name === 'Ravi' && Number(row.mark) === 88), updateResult.error || JSON.stringify(afterVendor));
+    const updateResult = await confirm(IntellaUpdate);
+    const afterIntella = await marks(adapter);
+    check('confirmed Intella update writes 88', updateResult.success && afterIntella.some((row) => row.name === 'Ravi' && Number(row.mark) === 88), updateResult.error || JSON.stringify(afterIntella));
 
-    const insertStaged = await stageNaturalLanguageOperation('@vendor add Karthik from CSE with mark 88', USER_ID, { currentTable: 'students' });
+    const insertStaged = await stageNaturalLanguageOperation('@Intella add Karthik from CSE with mark 88', USER_ID, { currentTable: 'students' });
     const insertResult = await confirm(insertStaged);
     const afterInsert = await marks(adapter);
-    check('confirmed vendor insert adds Karthik', insertResult.success && afterInsert.some((row) => row.name === 'Karthik' && row.department === 'CSE' && Number(row.mark) === 88), insertStaged.sql || insertResult.error);
+    check('confirmed Intella insert adds Karthik', insertResult.success && afterInsert.some((row) => row.name === 'Karthik' && row.department === 'CSE' && Number(row.mark) === 88), insertStaged.sql || insertResult.error);
 
-    const deleteStaged = await stageNaturalLanguageOperation('@vendor delete Karthik', USER_ID, { currentTable: 'students' });
+    const deleteStaged = await stageNaturalLanguageOperation('@Intella delete Karthik', USER_ID, { currentTable: 'students' });
     const deleteResult = await confirm(deleteStaged);
     const afterDelete = await marks(adapter);
-    check('confirmed vendor delete removes Karthik', deleteResult.success && !afterDelete.some((row) => row.name === 'Karthik'), deleteStaged.sql || deleteResult.error);
+    check('confirmed Intella delete removes Karthik', deleteResult.success && !afterDelete.some((row) => row.name === 'Karthik'), deleteStaged.sql || deleteResult.error);
 
     const mismatch = await reviewSQL({
-      naturalLanguageQuery: '@vendor delete Rahul',
+      naturalLanguageQuery: '@Intella delete Rahul',
       generatedSQL: 'DROP TABLE students;',
       dbType: 'sqlite',
       schema,
@@ -116,13 +116,13 @@ async function main() {
     check('blocked DROP did not remove students', stillThere.rows.length === 1);
 
     schema = await adapter.discoverSchema();
-    const alterStaged = await stageNaturalLanguageOperation('@vendor add an email column to students', USER_ID, { currentTable: 'students' });
-    check('vendor DDL is staged', alterStaged.type === 'confirmation_required' && /ALTER TABLE students/i.test(alterStaged.sql), alterStaged.sql || alterStaged.error);
+    const alterStaged = await stageNaturalLanguageOperation('@Intella add an email column to students', USER_ID, { currentTable: 'students' });
+    check('Intella DDL is staged', alterStaged.type === 'confirmation_required' && /ALTER TABLE students/i.test(alterStaged.sql), alterStaged.sql || alterStaged.error);
     const alterResult = await confirm(alterStaged);
     const afterAlter = await adapter.discoverSchema();
     check('confirmed ALTER adds email on the sqlite file', alterResult.success && Object.prototype.hasOwnProperty.call(afterAlter.tables.students.columns, 'email'), alterResult.error || JSON.stringify(afterAlter.tables.students.columns));
 
-    const dropStaged = await stageNaturalLanguageOperation('@vendor drop students', USER_ID, { currentTable: 'students' });
+    const dropStaged = await stageNaturalLanguageOperation('@Intella drop students', USER_ID, { currentTable: 'students' });
     const refused = await confirmAndExecuteOperation({
       operationId: dropStaged.operationId,
       userId: USER_ID,

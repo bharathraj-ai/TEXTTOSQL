@@ -4,6 +4,7 @@
 // Implements unified interface for MySQL and MariaDB databases.
 
 const mysql = require('mysql2/promise');
+const { redactLogText } = require('../utils/safeLog');
 
 const QUERY_TIMEOUT_MS = 5000;
 const MAX_RESULT_ROWS = 100;
@@ -93,7 +94,10 @@ class MysqlAdapter {
           TABLE_NAME AS table_name,
           COLUMN_NAME AS column_name,
           DATA_TYPE AS data_type,
-          COLUMN_KEY AS column_key
+          IS_NULLABLE AS is_nullable,
+          COLUMN_DEFAULT AS column_default,
+          COLUMN_KEY AS column_key,
+          EXTRA AS extra
         FROM information_schema.COLUMNS
         WHERE TABLE_SCHEMA = DATABASE()
         ORDER BY TABLE_NAME, ORDINAL_POSITION;
@@ -104,12 +108,23 @@ class MysqlAdapter {
         if (!schema.tables[tableName]) {
           schema.tables[tableName] = {
             columns: {},
+            nullable: {},
+            defaults: {},
+            identity: {},
             primaryKeys: [],
           };
         }
-        schema.tables[tableName].columns[row.column_name] = row.data_type;
+        const tableInfo = schema.tables[tableName];
+        tableInfo.columns[row.column_name] = row.data_type;
+        tableInfo.nullable[row.column_name] = String(row.is_nullable || '').toUpperCase() === 'YES';
+        if (row.column_default != null && String(row.column_default) !== '') {
+          tableInfo.defaults[row.column_name] = String(row.column_default);
+        }
+        if (/auto_increment/i.test(String(row.extra || ''))) {
+          tableInfo.identity[row.column_name] = true;
+        }
         if (row.column_key === 'PRI') {
-          schema.tables[tableName].primaryKeys.push(row.column_name);
+          tableInfo.primaryKeys.push(row.column_name);
         }
       }
 
@@ -150,7 +165,13 @@ class MysqlAdapter {
         // Some older MySQL versions or MariaDB may ignore or not have max_execution_time
       }
 
-      const [rows, fields] = await connection.query(sql);
+      let rows;
+      let fields;
+      try {
+        [rows, fields] = await connection.query(sql);
+      } catch (err) {
+        throw mysqlSafeError(err);
+      }
       const executionTime = Date.now() - startTime;
 
       let finalColumns = [];
@@ -198,7 +219,7 @@ class MysqlAdapter {
       };
     } catch (err) {
       await connection.rollback().catch(() => {});
-      throw err;
+      throw mysqlSafeError(err);
     } finally {
       connection.release();
     }
@@ -210,6 +231,13 @@ class MysqlAdapter {
       this.pool = null;
     }
   }
+}
+
+function mysqlSafeError(err) {
+  const text = redactLogText(err && err.message ? err.message : err);
+  const safe = new Error(text || 'MySQL query failed.');
+  safe.code = err && err.code;
+  return safe;
 }
 
 module.exports = { MysqlAdapter };

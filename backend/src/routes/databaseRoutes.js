@@ -5,6 +5,7 @@
 // user-provided databases.
 
 const express = require('express');
+const { safeErrorMessage } = require('../utils/safeLog');
 const authMiddleware = require('../middleware/authMiddleware');
 const {
   testRawConnection,
@@ -16,6 +17,7 @@ const {
   assertUserConnection,
 } = require('../services/connectionManager');
 const { browseTable, applyDirectChange } = require('../services/tableWorkspaceService');
+const { computeTableAnalytics } = require('../services/analyticsService');
 const {
   invalidateUserSchemaCache,
   getDatabaseSchema,
@@ -40,7 +42,7 @@ router.get('/status', async (req, res) => {
       ...status,
     });
   } catch (err) {
-    console.error('[DATABASE_ROUTE] Status error:', err.message);
+    console.error('[DATABASE_ROUTE] Status error:', safeErrorMessage(err));
     return res.status(500).json({
       success: false,
       error: 'Failed to retrieve database status.',
@@ -71,7 +73,7 @@ router.post('/test', async (req, res) => {
       ...testResult,
     });
   } catch (err) {
-    console.error('[DATABASE_ROUTE] Test error:', err.message);
+    console.error('[DATABASE_ROUTE] Test error:', safeErrorMessage(err));
     return res.status(400).json({
       success: false,
       error: err.message || 'Connection test failed.',
@@ -108,7 +110,7 @@ router.post('/connect', async (req, res) => {
       ...connectionInfo,
     });
   } catch (err) {
-    console.error('[DATABASE_ROUTE] Connect error:', err.message);
+    console.error('[DATABASE_ROUTE] Connect error:', safeErrorMessage(err));
     return res.status(400).json({
       success: false,
       error: err.message || 'Failed to connect to the database.',
@@ -146,7 +148,7 @@ router.post('/connect-default', async (req, res) => {
       ...connectionInfo,
     });
   } catch (err) {
-    console.error('[DATABASE_ROUTE] Connect default error:', err.message);
+    console.error('[DATABASE_ROUTE] Connect default error:', safeErrorMessage(err));
     return res.status(400).json({
       success: false,
       error: err.message || 'Failed to connect to default database.',
@@ -172,7 +174,7 @@ router.post('/disconnect', async (req, res) => {
       connected: false,
     });
   } catch (err) {
-    console.error('[DATABASE_ROUTE] Disconnect error:', err.message);
+    console.error('[DATABASE_ROUTE] Disconnect error:', safeErrorMessage(err));
     return res.status(500).json({
       success: false,
       error: 'Failed to disconnect database.',
@@ -197,7 +199,7 @@ router.get('/schema', async (req, res) => {
       dbType: adapter.type,
     });
   } catch (err) {
-    console.error('[DATABASE_ROUTE] Schema error:', err.message);
+    console.error('[DATABASE_ROUTE] Schema error:', safeErrorMessage(err));
     return res.status(500).json({
       success: false,
       error: 'Failed to retrieve database schema.',
@@ -259,7 +261,7 @@ router.get('/browse', async (req, res) => {
       rowCount: (result.rows || []).length,
     });
   } catch (err) {
-    console.error('[DATABASE_ROUTE] Browse error:', err.message);
+    console.error('[DATABASE_ROUTE] Browse error:', safeErrorMessage(err));
     return res.status(500).json({
       success: false,
       error: 'Could not load table data.',
@@ -282,11 +284,55 @@ router.get('/summary', async (req, res) => {
       dbType: adapter.type,
     });
   } catch (err) {
-    console.error('[DATABASE_ROUTE] Summary error:', err.message);
+    console.error('[DATABASE_ROUTE] Summary error:', safeErrorMessage(err));
     return res.status(500).json({
       success: false,
       error: 'Failed to retrieve schema summary.',
     });
+  }
+});
+
+function analyticsError(err) {
+  const message = String(err?.message || '');
+  if (err?.statusCode === 401 || err?.statusCode === 403) {
+    return { status: err.statusCode, error: message };
+  }
+  if (/not in the connected database/i.test(message)) {
+    return { status: 404, error: 'That table is not in the connected database.' };
+  }
+  if (err?.statusCode === 400 && message) {
+    return { status: 400, error: message };
+  }
+  return { status: 500, error: 'Unable to calculate analytics.' };
+}
+
+/**
+ * GET /api/database/analytics?table=name&connectionId=
+ * Aggregates the full table on the signed-in user's database.
+ * The client sends a table name, never SQL.
+ */
+router.get('/analytics', async (req, res) => {
+  try {
+    if (req.query.sql || req.query.query) {
+      return res.status(400).json({
+        success: false,
+        error: 'Choose a table from the sidebar.',
+      });
+    }
+    const { adapter } = await assertUserConnection(req.user.id, req.query.connectionId);
+    if (adapter.type === 'mongodb') {
+      return res.status(400).json({
+        success: false,
+        error: 'Analytics are not available for MongoDB connections.',
+      });
+    }
+    const schema = await getDatabaseSchema(false, adapter, req.user.id);
+    const analytics = await computeTableAnalytics(adapter, schema, req.query.table);
+    return res.json({ success: true, ...analytics });
+  } catch (err) {
+    const mapped = analyticsError(err);
+    console.error('[DATABASE_ROUTE] Analytics error:', safeErrorMessage(err));
+    return res.status(mapped.status).json({ success: false, error: mapped.error });
   }
 });
 

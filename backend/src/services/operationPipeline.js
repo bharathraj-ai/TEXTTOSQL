@@ -13,6 +13,7 @@ const { validateQuery } = require('../utils/sqlValidator');
 const { reviewSQL } = require('./sqlReviewService');
 const { createPendingOperation } = require('./pendingOperationStore');
 const { classifyQuery, QUERY_CATEGORIES } = require('./queryClassifier');
+const { analyzeLanguage } = require('./languageService');
 
 function publicReview(review) {
   if (!review) return null;
@@ -39,7 +40,7 @@ function publicReview(review) {
  * @returns {Promise<object>}
  */
 async function stageNaturalLanguageOperation(question, userId = null, options = {}) {
-  const trimmed = String(question || '').replace(/^@vendor\s+/i, '').trim();
+  const trimmed = String(question || '').replace(/^@Intellaa\s+/i, '').trim();
   if (!trimmed) {
     return {
       success: false,
@@ -49,8 +50,24 @@ async function stageNaturalLanguageOperation(question, userId = null, options = 
     };
   }
 
-  const classification = classifyQuery(trimmed);
-  const ddlIntent = detectDDLIntent(trimmed);
+  const languagePreview = analyzeLanguage(trimmed);
+  if (languagePreview.status === 'clarification' || languagePreview.status === 'ambiguous') {
+    return {
+      success: false,
+      statusCode: 400,
+      type: 'clarification_required',
+      message: languagePreview.message,
+      options: languagePreview.options || [],
+      language: languagePreview.language,
+      normalizedRequest: languagePreview.normalized_request,
+      sql: null,
+    };
+  }
+  const routeText = languagePreview.language === 'english'
+    ? trimmed
+    : (options.normalizedRequest || languagePreview.normalized_request || trimmed);
+  const classification = classifyQuery(routeText);
+  const ddlIntent = detectDDLIntent(routeText);
   const isDDL = classification.category === QUERY_CATEGORIES.DDL || Boolean(ddlIntent);
 
   let adapter;
@@ -59,9 +76,11 @@ async function stageNaturalLanguageOperation(question, userId = null, options = 
   } catch (err) {
     return {
       success: false,
-      statusCode: 400,
+      statusCode: err.statusCode || 400,
       type: 'mutation_error',
-      error: 'Database not connected. Please connect a database first.',
+      error: err.statusCode === 401
+        ? 'Authentication required.'
+        : 'Database not connected. Please connect a database first.',
     };
   }
 
@@ -97,14 +116,32 @@ async function stageNaturalLanguageOperation(question, userId = null, options = 
     };
   }
 
+  let workingQuestion = options.normalizedRequest || trimmed;
+  const resolvedLanguage = analyzeLanguage(trimmed, schema);
+  if (resolvedLanguage.language !== 'english') {
+    if (resolvedLanguage.status === 'clarification' || resolvedLanguage.status === 'ambiguous') {
+      return {
+        success: false,
+        statusCode: 400,
+        type: 'clarification_required',
+        message: resolvedLanguage.message,
+        options: resolvedLanguage.options || [],
+        language: resolvedLanguage.language,
+        normalizedRequest: resolvedLanguage.normalized_request,
+        sql: null,
+      };
+    }
+    workingQuestion = resolvedLanguage.normalized_request;
+  }
+
   let plan;
   try {
     const scoped = options.currentTable && schema?.tables
-      && !Object.keys(schema.tables).some((name) => new RegExp(`\\b${name}\\b`, 'i').test(trimmed))
-      ? `${trimmed} from ${options.currentTable}`
-      : trimmed;
+      && !Object.keys(schema.tables).some((name) => new RegExp(`\\b${name}\\b`, 'i').test(workingQuestion))
+      ? `${workingQuestion} from ${options.currentTable}`
+      : workingQuestion;
     plan = isDDL
-      ? generateDDLPlan(trimmed, schema, dbType)
+      ? generateDDLPlan(workingQuestion, schema, dbType, options.currentTable)
       : generateMutationPlan(scoped, schema, dbType);
   } catch (planErr) {
     return {
@@ -117,7 +154,11 @@ async function stageNaturalLanguageOperation(question, userId = null, options = 
 
   const sqlOp = (plan.sql || '').trim().match(/^(\w+)/)?.[1]?.toUpperCase() || plan.intent;
   const validationMode = ['CREATE', 'ALTER', 'DROP', 'TRUNCATE'].includes(sqlOp) ? 'ddl' : 'write';
-  const validation = validateQuery(plan.sql, schema, dbType, validationMode);
+  const explicitMass = /\b(everyone|everybody|all\s+(rows|records|students|of them)|entire\s+table)\b/i.test(workingQuestion);
+  const allowMass = explicitMass
+    && (plan.intent === 'UPDATE' || plan.intent === 'DELETE')
+    && plan.hasWhereClause === false;
+  const validation = validateQuery(plan.sql, schema, dbType, validationMode, { allowMass });
   if (!validation.valid) {
     return {
       success: false,
@@ -134,12 +175,13 @@ async function stageNaturalLanguageOperation(question, userId = null, options = 
   let review = null;
   try {
     review = await reviewSQL({
-      naturalLanguageQuery: trimmed,
+      naturalLanguageQuery: workingQuestion,
       generatedSQL: plan.sql,
       dbType,
       schema,
       operation: plan.intent,
       userId,
+      columnValues: plan.columnValues || null,
     });
   } catch (revErr) {
     review = {
@@ -178,7 +220,6 @@ async function stageNaturalLanguageOperation(question, userId = null, options = 
         targetTable: plan.targetTable,
       };
     }
-    const explicitMass = /\b(everyone|everybody|all\s+(rows|records|students|of them)|entire\s+table)\b/i.test(trimmed);
     if (estimatedRows > 1 && !explicitMass) {
       return {
         success: false,
@@ -193,7 +234,7 @@ async function stageNaturalLanguageOperation(question, userId = null, options = 
     }
   }
 
-  const confirmPhrase = approved && (plan.intent === 'DROP' || plan.intent === 'TRUNCATE')
+  const confirmPhrase = approved && (plan.intent === 'DROP' || plan.intent === 'TRUNCATE' || allowMass)
     ? `${plan.intent} ${plan.targetTable}`
     : null;
 
@@ -208,6 +249,7 @@ async function stageNaturalLanguageOperation(question, userId = null, options = 
       userId,
       dbType,
       confirmPhrase,
+      allowMass,
     });
   }
 
@@ -217,9 +259,12 @@ async function stageNaturalLanguageOperation(question, userId = null, options = 
     type: approved ? 'confirmation_required' : 'operation_blocked',
     category: isDDL ? QUERY_CATEGORIES.DDL : QUERY_CATEGORIES.DATABASE_MODIFICATION,
     question: trimmed,
+    language: resolvedLanguage.language,
+    normalizedRequest: workingQuestion,
     intent: plan.intent,
     targetTable: plan.targetTable,
     sql: plan.sql,
+    columnValues: plan.columnValues || null,
     riskLevel: risk,
     warnings: plan.warnings || [],
     hasWhereClause: plan.hasWhereClause,

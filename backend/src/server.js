@@ -4,6 +4,14 @@
 
 require('dotenv').config();
 
+const { assertRequiredSecrets } = require('./config/requiredSecrets');
+try {
+  assertRequiredSecrets();
+} catch (err) {
+  console.error(`[STARTUP] ${err.message}`);
+  process.exit(1);
+}
+
 const express = require('express');
 const cors = require('cors');
 const authRoutes = require('./routes/authRoutes');
@@ -41,11 +49,21 @@ app.get('/health', (req, res) => {
 });
 
 // ── Start Server ──────────────────────────────
-app.listen(PORT, () => {
-  console.log(`\n🚀 Server running on http://localhost:${PORT}`);
-  console.log(`🔐 Auth endpoints: /api/auth/register, /api/auth/login, /api/auth/me`);
-  console.log(`📡 Query endpoint:    POST /api/query`);
-  console.log(`✅ Confirm endpoint:  POST /api/query/confirm`);
-  console.log(`✏️  Mutation endpoints: POST /api/mutation/stage | POST /api/mutation/confirm`);
-  console.log(`❤️  Health check:      GET  http://localhost:${PORT}/health\n`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`\n🚀 Server running on http://localhost:${PORT}`);
+    console.log(`🔐 Auth endpoints: /api/auth/register, /api/auth/login, /api/auth/me`);
+    console.log(`📡 Query endpoint:    POST /api/query`);
+    console.log(`✅ Confirm endpoint:  POST /api/query/confirm`);
+    console.log(`✏️  Mutation endpoints: POST /api/mutation/stage | POST /api/mutation/confirm`);
+    console.log(`❤️  Health check:      GET  http://localhost:${PORT}/health`);
+    const { groqConfiguration } = require('./services/groqService');
+    const { openRouterConfiguration } = require('./services/sqlReviewService');
+    const groq = groqConfiguration();
+    const review = openRouterConfiguration();
+    console.log(`Groq: ${groq.configured ? 'configured' : 'not configured'}`);
+    console.log(`OpenRouter: ${review.enabled ? 'enabled' : 'disabled'}, ${review.configured ? 'configured' : 'not configured'}, budget USD ${review.maxBudgetUsd}\n`);
+  });
+}
+
+module.exports = app;

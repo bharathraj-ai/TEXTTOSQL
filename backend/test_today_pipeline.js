@@ -71,6 +71,8 @@ async function main() {
   const convo = await processNaturalLanguageQuery('Hello');
   check('Hello skips SQL', convo.type === 'conversation' && !convo.sql, convo.type);
 
+  delete process.env.OPENROUTER_API_KEY;
+
   const mismatch = await reviewSQL({
     naturalLanguageQuery: 'Delete Rahul',
     generatedSQL: 'DROP TABLE students;',
@@ -96,7 +98,7 @@ async function main() {
     schema,
     operation: 'DROP',
   });
-  check('explicit DROP is staged for typed confirmation', dropReview.approved === true && dropReview.risk === 'CRITICAL' && dropReview.reviewUnavailable === true, dropReview.reason);
+  check('explicit DROP is blocked when reviewer is unavailable', dropReview.approved === false && dropReview.risk === 'CRITICAL' && dropReview.reviewUnavailable === true, dropReview.reason);
 
   const selectSql = generateSQL('Show all students', schema, [], 'sqlite');
   const aboveSql = generateSQL('Show students above 80', schema, [], 'sqlite');
@@ -223,12 +225,12 @@ async function main() {
       schema,
       operation: 'ALTER',
     });
-    check('ALTER is staged for confirmation without OpenRouter', alterReview.approved === true && alterReview.risk === 'HIGH', alterReview.reason);
+    check('ALTER is blocked when reviewer is unavailable', alterReview.approved === false && alterReview.risk === 'HIGH' && alterReview.reviewUnavailable === true, alterReview.reason);
     check('ALTER SQL itself is locally valid', alterCheck.valid, alterCheck.error || alterPlan.sql);
     check('ALTER was not executed before confirmation', true, 'staged only');
 
     const dropPlan = generateDDLPlan('Drop employees table', schema, 'sqlite');
-    check('DROP SQL generated but not executed in this script', /DROP TABLE employees/i.test(dropPlan.sql) && dropReview.approved === true);
+    check('DROP SQL generated but not executed in this script', /DROP TABLE employees/i.test(dropPlan.sql) && dropReview.approved === false);
   } finally {
     await adapter.close();
     fs.rmSync(dbFile, { force: true });

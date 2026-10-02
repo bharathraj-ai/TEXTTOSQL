@@ -10,20 +10,7 @@
 const jwt = require('jsonwebtoken');
 const appPool = require('../db/applicationDatabase');
 const { isBlacklisted } = require('../utils/tokenBlacklist');
-
-// Fail fast: require JWT_SECRET from environment
-if (!process.env.JWT_SECRET) {
-  console.error('[AUTH] FATAL: JWT_SECRET environment variable is not set. Server cannot start securely.');
-  // In production, hard-fail. In tests, allow fallback with a warning.
-  if (process.env.NODE_ENV === 'production') {
-    process.exit(1);
-  }
-}
-
-const JWT_SECRET = process.env.JWT_SECRET || (() => {
-  console.warn('[AUTH] WARNING: Using default JWT_SECRET. Set JWT_SECRET in your .env file for security.');
-  return 'nl_sql_jwt_secret_key_super_secure_2026_production_v2';
-})();
+const { getJwtSecret } = require('../config/requiredSecrets');
 
 async function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -46,7 +33,7 @@ async function authMiddleware(req, res, next) {
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, getJwtSecret());
 
     // Verify user exists in application database
     const userResult = await appPool.query(

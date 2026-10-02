@@ -6,6 +6,7 @@
 
 const pool = require('../db/database');
 const { validateQuery } = require('../utils/sqlValidator');
+const { logSafeSql, safeErrorMessage } = require('../utils/safeLog');
 
 // Configuration
 const QUERY_TIMEOUT_MS = 5000;
@@ -88,8 +89,8 @@ async function executeSQL(sql, schema = null, targetPool = null) {
       throw new Error('Query execution timed out. The query took too long to execute.');
     }
 
-    console.error(`[DATABASE] Query error: ${err.message}`);
-    console.error(`[DATABASE] Failed SQL: ${sql}`);
+    console.error(`[DATABASE] Query error: ${safeErrorMessage(err)}`);
+    logSafeSql('[DATABASE] Failed SQL:', sql);
     throw err;
   }
 }

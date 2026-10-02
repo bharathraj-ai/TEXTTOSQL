@@ -14,12 +14,15 @@ const AUTH_TAG_LENGTH = 16;
  * Get 32-byte encryption key buffer from environment variable
  */
 function getKey() {
-  const rawKey = process.env.ENCRYPTION_KEY || 'e8b2c4d6f1a35790b8e4c2d1a6f83579e8b2c4d6f1a35790b8e4c2d1a6f83579';
-  if (/^[0-9a-fA-F]{64}$/.test(rawKey)) {
-    return Buffer.from(rawKey, 'hex');
+  const rawKey = process.env.ENCRYPTION_KEY;
+  if (rawKey == null || String(rawKey).trim() === '') {
+    throw new Error('ENCRYPTION_KEY is required. Refusing to encrypt without it.');
   }
-  // Fallback: SHA-256 hash of whatever string is provided to ensure 32 bytes
-  return crypto.createHash('sha256').update(String(rawKey)).digest();
+  const trimmed = String(rawKey).trim();
+  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+    return Buffer.from(trimmed, 'hex');
+  }
+  return crypto.createHash('sha256').update(trimmed).digest();
 }
 
 /**

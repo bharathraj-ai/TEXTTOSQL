@@ -73,11 +73,21 @@ async function getDatabaseSchema(forceRefresh = false, targetPool = null, userId
     if (!schema.tables[tableName]) {
       schema.tables[tableName] = {
         columns: {},
+        nullable: {},
+        defaults: {},
+        identity: {},
         primaryKeys: [],
       };
     }
 
     schema.tables[tableName].columns[row.column_name] = row.data_type;
+    schema.tables[tableName].nullable[row.column_name] = row.is_nullable === 'YES';
+    if (row.column_default) {
+      schema.tables[tableName].defaults[row.column_name] = row.column_default;
+      if (/nextval|identity/i.test(row.column_default)) {
+        schema.tables[tableName].identity[row.column_name] = true;
+      }
+    }
   }
 
   // ── 2. Discover primary keys ────────────────────────
@@ -245,91 +255,346 @@ async function getSchemaSummary(userId = null, targetPool = null) {
 // ─── Day 3: Relevant Schema Selection ───────
 // ══════════════════════════════════════════════
 
+const GENERIC_COLUMN_WORDS = new Set([
+  'name', 'names', 'id', 'ids', 'status', 'created', 'updated', 'date', 'dates',
+  'type', 'types', 'email', 'description', 'value', 'data', 'time', 'user', 'users',
+]);
+
+const QUESTION_STOPWORDS = new Set([
+  'show', 'list', 'find', 'get', 'fetch', 'display', 'select', 'all', 'the', 'a', 'an',
+  'me', 'my', 'of', 'in', 'on', 'for', 'with', 'from', 'please', 'what', 'is', 'are',
+  'how', 'many', 'there', 'do', 'does', 'i', 'you', 'your', 'database', 'table', 'tables',
+  'duplicate', 'duplicates', 'each', 'every', 'above', 'below', 'than', 'and', 'or', 'to',
+  'into', 'where', 'who', 'which', 'their', 'this', 'that',
+]);
+
+function singularizeWord(word) {
+  if (word.endsWith('ies') && word.length > 4) return `${word.slice(0, -3)}y`;
+  if (/(sses|xes|zes|ches|shes)$/.test(word) && word.length > 4) return word.slice(0, -2);
+  if (word.endsWith('s') && !word.endsWith('ss') && word.length > 3) return word.slice(0, -1);
+  return word;
+}
+
+function pluralizeWord(word) {
+  if (word.endsWith('y') && !/[aeiou]y$/.test(word)) return `${word.slice(0, -1)}ies`;
+  if (/(s|x|z|ch|sh)$/.test(word)) return `${word}es`;
+  if (word.endsWith('s')) return word;
+  return `${word}s`;
+}
+
+function normalizeQuestion(question) {
+  return String(question || '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function containsPhrase(text, phrase) {
+  if (!text || !phrase) return false;
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`).test(text);
+}
+
+function nameForms(name) {
+  const spaced = String(name || '').replace(/[_-]+/g, ' ').toLowerCase().trim();
+  const parts = spaced.split(/\s+/).filter(Boolean);
+  const forms = new Set([spaced, spaced.replace(/\s+/g, '')]);
+  if (parts.length) {
+    const last = parts[parts.length - 1];
+    const singular = singularizeWord(last);
+    const plural = pluralizeWord(last);
+    if (singular !== last) {
+      const next = parts.slice(0, -1).concat(singular).join(' ');
+      forms.add(next);
+      forms.add(next.replace(/\s+/g, ''));
+    }
+    if (plural !== last) {
+      const next = parts.slice(0, -1).concat(plural).join(' ');
+      forms.add(next);
+      forms.add(next.replace(/\s+/g, ''));
+    }
+  }
+  return [...forms].filter((form) => form.length >= 3);
+}
+
+function isGeneralSchemaQuestion(question) {
+  const q = normalizeQuestion(question);
+  if (/\bwhat tables\b/.test(q) || /\bwhich tables\b/.test(q) || /\blist tables\b/.test(q) || /\bshow tables\b/.test(q)) {
+    return true;
+  }
+  if (/\b(database|schema) structure\b/.test(q) || /\bshow me the database structure\b/.test(q)) {
+    return true;
+  }
+  if (/\brelationships?\b/.test(q) && /\b(tables|database|schema)\b/.test(q)) {
+    return true;
+  }
+  return false;
+}
+
+function tableWordForms(tableNames) {
+  const forms = new Set();
+  for (const table of tableNames) {
+    for (const part of String(table).toLowerCase().split(/[_-]+/)) {
+      if (part.length < 3) continue;
+      forms.add(part);
+      forms.add(singularizeWord(part));
+      forms.add(pluralizeWord(part));
+    }
+  }
+  return forms;
+}
+
+function relationshipEnds(rel) {
+  return [String(rel.from || '').split('.')[0], String(rel.to || '').split('.')[0]];
+}
+
+function expandRelatedTables(primaryTables, relationships = []) {
+  const primarySet = new Set(primaryTables);
+  const related = new Set();
+  const neighborsOf = (table) => {
+    const neighbors = [];
+    for (const rel of relationships) {
+      const [fromTable, toTable] = relationshipEnds(rel);
+      if (fromTable === table && toTable && !primarySet.has(toTable)) neighbors.push(toTable);
+      if (toTable === table && fromTable && !primarySet.has(fromTable)) neighbors.push(fromTable);
+    }
+    return neighbors;
+  };
+
+  for (const table of primaryTables) {
+    for (const neighbor of neighborsOf(table)) related.add(neighbor);
+  }
+
+  const junctions = [...related].filter((table) => {
+    const ends = new Set();
+    for (const rel of relationships) {
+      const [fromTable, toTable] = relationshipEnds(rel);
+      if (fromTable === table && toTable) ends.add(toTable);
+      if (toTable === table && fromTable) ends.add(fromTable);
+    }
+    return ends.size >= 2;
+  });
+
+  for (const table of junctions) {
+    for (const neighbor of neighborsOf(table)) related.add(neighbor);
+  }
+
+  for (const table of primaryTables) related.delete(table);
+  return [...related];
+}
+
+function filterSchema(fullSchema, tableNames) {
+  const selected = new Set(tableNames);
+  const filtered = { tables: {}, relationships: [] };
+  for (const table of selected) {
+    if (fullSchema.tables[table]) filtered.tables[table] = fullSchema.tables[table];
+  }
+  for (const rel of fullSchema.relationships || []) {
+    const [fromTable, toTable] = relationshipEnds(rel);
+    if (selected.has(fromTable) || selected.has(toTable)) filtered.relationships.push(rel);
+  }
+  return filtered;
+}
+
+function requestedPhrase(question) {
+  const tokens = normalizeQuestion(question)
+    .split(' ')
+    .filter((token) => token && !QUESTION_STOPWORDS.has(token) && token.length > 2);
+  return tokens.join(' ');
+}
+
+function emptyRetrieval(status, extra = {}) {
+  return {
+    status,
+    confidence: 0,
+    matchedTables: [],
+    relatedTables: [],
+    requestedEntities: [],
+    ambiguous: status === 'AMBIGUOUS',
+    reason: '',
+    message: '',
+    options: [],
+    tables: {},
+    relationships: [],
+    ...extra,
+  };
+}
+
 /**
- * Given a natural-language question and the full schema,
- * select only the tables that are likely relevant.
- *
- * Uses keyword/table-name matching + FK relationship traversal.
- * If no tables match, returns the full schema (safer fallback).
+ * Score a question against the live schema.
+ * Table-name matches outrank column matches. Foreign keys expand only
+ * after a primary table is identified. A miss does not return every table.
  *
  * @param {string} question
  * @param {object} fullSchema
- * @returns {object} - Filtered schema { tables, relationships }
+ * @returns {object}
  */
 function getRelevantSchema(question, fullSchema) {
-  if (!fullSchema || !fullSchema.tables) return fullSchema;
-
-  const q = question.toLowerCase();
-  const matchedTables = new Set();
-  const tableNames = Object.keys(fullSchema.tables);
-
-  // ── 1. Direct table name matching ───────────────────
-  for (const table of tableNames) {
-    const singular = table.replace(/s$/, '').replace(/ies$/, 'y').replace(/es$/, '');
-    if (q.includes(table.toLowerCase()) || q.includes(singular.toLowerCase())) {
-      matchedTables.add(table);
-    }
+  if (!fullSchema || !fullSchema.tables) {
+    return emptyRetrieval('NOT_FOUND', {
+      reason: 'No schema is available.',
+      message: 'No database schema is available for this question.',
+    });
   }
 
-  // ── 2. Column name matching (for ambiguous queries) ──
+  const tableNames = Object.keys(fullSchema.tables);
+  const normalized = normalizeQuestion(question);
+
+  if (isGeneralSchemaQuestion(question)) {
+    return {
+      status: 'GENERAL_SCHEMA',
+      confidence: 1,
+      matchedTables: tableNames,
+      relatedTables: [],
+      requestedEntities: [],
+      ambiguous: false,
+      reason: 'The question asks about the database structure.',
+      message: '',
+      options: [],
+      tables: fullSchema.tables,
+      relationships: fullSchema.relationships || [],
+    };
+  }
+
+  const knownTableWords = tableWordForms(tableNames);
+  const scores = {};
+  const reasons = {};
+  const genericHits = {};
+
+  const note = (table, points, reason) => {
+    scores[table] = (scores[table] || 0) + points;
+    if (!reasons[table]) reasons[table] = [];
+    reasons[table].push(reason);
+  };
+
+  for (const table of tableNames) {
+    const spaced = table.toLowerCase().replace(/[_-]+/g, ' ');
+    const compact = spaced.replace(/\s+/g, '');
+    const exact = containsPhrase(normalized, spaced) || containsPhrase(normalized.replace(/\s+/g, ''), compact);
+    if (exact) {
+      note(table, 100, `table "${table}"`);
+      continue;
+    }
+    const normalizedHit = nameForms(table).some((form) => containsPhrase(normalized, form));
+    if (normalizedHit) note(table, 90, `normalized table "${table}"`);
+  }
+
   for (const [table, info] of Object.entries(fullSchema.tables)) {
-    for (const col of Object.keys(info.columns)) {
-      // Match meaningful column names (skip id, created_at, etc.)
-      if (col.length > 3 && !['created_at', 'updated_at'].includes(col)) {
-        const colWords = col.split('_');
-        for (const word of colWords) {
-          if (word.length > 3 && q.includes(word)) {
-            matchedTables.add(table);
-          }
+    for (const column of Object.keys(info.columns || {})) {
+      const columnName = column.toLowerCase();
+      if (columnName === 'id' || columnName === 'created_at' || columnName === 'updated_at') continue;
+      const columnPhrase = columnName.replace(/[_-]+/g, ' ');
+      const words = columnPhrase.split(' ').filter((word) => word.length > 3);
+      const genericColumn = words.length > 0 && words.every((word) => GENERIC_COLUMN_WORDS.has(word) || GENERIC_COLUMN_WORDS.has(singularizeWord(word)));
+
+      if (!genericColumn && (containsPhrase(normalized, columnPhrase) || containsPhrase(normalized, pluralizeWord(columnPhrase)))) {
+        note(table, 40, `column "${column}"`);
+        continue;
+      }
+
+      for (const word of words) {
+        const singular = singularizeWord(word);
+        const plural = pluralizeWord(word);
+        const mentioned = containsPhrase(normalized, word) || containsPhrase(normalized, singular) || containsPhrase(normalized, plural);
+        if (!mentioned) continue;
+        if (knownTableWords.has(word) || knownTableWords.has(singular)) continue;
+        if (GENERIC_COLUMN_WORDS.has(word) || GENERIC_COLUMN_WORDS.has(singular)) {
+          note(table, 5, `generic column "${word}"`);
+          if (!genericHits[singular]) genericHits[singular] = new Set();
+          genericHits[singular].add(table);
+        } else {
+          note(table, 30, `column word "${word}"`);
         }
       }
     }
   }
 
-  // ── 3. FK relationship traversal ────────────────────
-  // If we matched "orders", also include "customers" if orders.customer_id → customers.id
-  const additionalTables = new Set();
-  for (const rel of fullSchema.relationships) {
-    const [fromTable] = rel.from.split('.');
-    const [toTable] = rel.to.split('.');
-    if (matchedTables.has(fromTable) && !matchedTables.has(toTable)) {
-      additionalTables.add(toTable);
-    }
-    if (matchedTables.has(toTable) && !matchedTables.has(fromTable)) {
-      additionalTables.add(fromTable);
-    }
-  }
-  for (const t of additionalTables) {
-    matchedTables.add(t);
-  }
+  const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+  const tableLevel = ranked.filter(([, score]) => score >= 90);
+  const strongColumn = ranked.filter(([, score]) => score >= 30 && score < 90);
 
-  // ── 4. Fallback: return full schema if nothing matched ──
-  if (matchedTables.size === 0) {
-    return fullSchema;
-  }
-
-  // ── 5. Build filtered schema ────────────────────────
-  const filtered = {
-    tables: {},
-    relationships: [],
-  };
-
-  for (const table of matchedTables) {
-    if (fullSchema.tables[table]) {
-      filtered.tables[table] = fullSchema.tables[table];
-    }
+  if (tableLevel.length > 0) {
+    const primary = tableLevel.map(([table]) => table);
+    const related = expandRelatedTables(primary, fullSchema.relationships || []);
+    const filtered = filterSchema(fullSchema, [...primary, ...related]);
+    const confidence = tableLevel[0][1] >= 100 ? 0.95 : 0.92;
+    console.log(`[SCHEMA] FOUND ${primary.join(', ')} related ${related.join(', ') || '(none)'}`);
+    return {
+      status: 'FOUND',
+      confidence,
+      matchedTables: primary,
+      relatedTables: related,
+      requestedEntities: primary,
+      ambiguous: false,
+      reason: reasons[primary[0]]?.[0] || 'Table match',
+      message: '',
+      options: [],
+      tables: filtered.tables,
+      relationships: filtered.relationships,
+    };
   }
 
-  for (const rel of fullSchema.relationships) {
-    const [fromTable] = rel.from.split('.');
-    const [toTable] = rel.to.split('.');
-    if (matchedTables.has(fromTable) || matchedTables.has(toTable)) {
-      filtered.relationships.push(rel);
-    }
+  if (strongColumn.length === 1) {
+    const [table] = strongColumn[0];
+    const related = expandRelatedTables([table], fullSchema.relationships || []);
+    const filtered = filterSchema(fullSchema, [table, ...related]);
+    console.log(`[SCHEMA] FOUND ${table} via column`);
+    return {
+      status: 'FOUND',
+      confidence: strongColumn[0][1] >= 40 ? 0.8 : 0.7,
+      matchedTables: [table],
+      relatedTables: related,
+      requestedEntities: [table],
+      ambiguous: false,
+      reason: reasons[table]?.[0] || 'Column match',
+      message: '',
+      options: [],
+      tables: filtered.tables,
+      relationships: filtered.relationships,
+    };
   }
 
-  console.log(`[SCHEMA] Relevant tables for question: ${Array.from(matchedTables).join(', ')}`);
-  return filtered;
+  if (strongColumn.length > 1) {
+    const names = strongColumn.map(([table]) => table);
+    const label = reasons[names[0]]?.find((item) => item.startsWith('column')) || 'column';
+    return emptyRetrieval('AMBIGUOUS', {
+      confidence: 0.42,
+      matchedTables: names,
+      requestedEntities: [label.replace(/^(column word|column) "/, '').replace(/"$/, '')],
+      reason: `Column match is shared by ${names.join(', ')}`,
+      message: `That request matches more than one table: ${names.join(', ')}. Which table should I check?`,
+      options: names.map((table) => `${question.trim()} in ${table}`),
+    });
+  }
+
+  const genericGroups = Object.entries(genericHits).filter(([, tables]) => tables.size > 1);
+  if (genericGroups.length > 0) {
+    const [word, tables] = genericGroups.sort((a, b) => b[1].size - a[1].size)[0];
+    const names = [...tables];
+    return emptyRetrieval('AMBIGUOUS', {
+      confidence: 0.42,
+      matchedTables: names,
+      requestedEntities: [word],
+      reason: `Column '${word}' exists in multiple tables`,
+      message: `The column '${word}' exists in multiple tables. Which table should I check?`,
+      options: names.map((table) => `${question.trim()} in ${table}`),
+    });
+  }
+
+  const phrase = requestedPhrase(question);
+  const label = phrase || 'that';
+  return emptyRetrieval('NOT_FOUND', {
+    requestedEntities: phrase ? [phrase] : [],
+    reason: 'No matching table or column entity found',
+    message: `I couldn't find a table or entity named '${label}' in the connected database.`,
+  });
+}
+
+function shouldGenerateSQL(retrieval) {
+  return Boolean(retrieval && retrieval.status === 'FOUND' && retrieval.tables && Object.keys(retrieval.tables).length > 0);
 }
 
 module.exports = {
@@ -340,5 +605,6 @@ module.exports = {
   invalidateUserSchemaCache,
   getSchemaSummary,
   getRelevantSchema,
+  shouldGenerateSQL,
   formatSchemaForPrompt,
 };

@@ -21,7 +21,7 @@
 // Read queries use the local rule engine, then optional OpenRouter review.
 // Conversation is handled by Groq and never touches the database.
 
-const { getDatabaseSchema, getRelevantSchema } = require('./schemaService');
+const { getDatabaseSchema, getRelevantSchema, shouldGenerateSQL } = require('./schemaService');
 const { generateSQL, correctSQL, generateExplanation, generateSuggestions } = require('./llmService');
 const { executeSQL } = require('./sqlService');
 const { validateQuery, validateSQL } = require('../utils/sqlValidator');
@@ -32,12 +32,14 @@ const { logQuery } = require('./auditService');
 const { getCachedQuery, setCachedQuery } = require('./queryCache');
 const { reviewSQL } = require('./sqlReviewService');
 const { classifyQuery, QUERY_CATEGORIES } = require('./queryClassifier');
+const { analyzeLanguage } = require('./languageService');
 const { handleConversation } = require('./groqService');
 const { stageNaturalLanguageOperation } = require('./operationPipeline');
 const { assertUserConnection } = require('./connectionManager');
+const { logSafeSql, safeErrorMessage } = require('../utils/safeLog');
 
-function stripVendorPrefix(text) {
-  return String(text || '').replace(/^@vendor\s+/i, '').trim();
+function stripIntellaaPrefix(text) {
+  return String(text || '').replace(/^@Intellaa\s+/i, '').trim();
 }
 
 function withCurrentTable(question, currentTable, schema) {
@@ -182,9 +184,24 @@ async function processNaturalLanguageQuery(question, userId = null, options = {}
     };
   }
 
-  const trimmedQuestion = stripVendorPrefix(question.trim());
+  const originalQuestion = stripIntellaaPrefix(question.trim());
+  const languagePreview = analyzeLanguage(originalQuestion);
+  if (languagePreview.status === 'clarification' || languagePreview.status === 'ambiguous') {
+    return {
+      success: false,
+      type: 'clarification_required',
+      message: languagePreview.message,
+      options: languagePreview.options || [],
+      language: languagePreview.language,
+      normalizedRequest: languagePreview.normalized_request,
+      sql: null,
+    };
+  }
+  let trimmedQuestion = languagePreview.language === 'english'
+    ? originalQuestion
+    : languagePreview.normalized_request;
   console.log(`\n${'═'.repeat(50)}`);
-  console.log(`[QUERY] User: ${userId || 'guest'} | Question: "${trimmedQuestion}"`);
+  console.log(`[QUERY] User: ${userId} | Question length: ${originalQuestion.length}`);
 
   // ── 1b. Classify before any database or SQL work ──
   const classification = classifyQuery(trimmedQuestion);
@@ -196,7 +213,9 @@ async function processNaturalLanguageQuery(question, userId = null, options = {}
       success: true,
       type: 'conversation',
       category: QUERY_CATEGORIES.CONVERSATION,
-      question: trimmedQuestion,
+      question: originalQuestion,
+      language: languagePreview.language,
+      normalizedRequest: null,
       message: convo.message,
       source: convo.source,
       model: convo.model || null,
@@ -208,7 +227,10 @@ async function processNaturalLanguageQuery(question, userId = null, options = {}
     classification.category === QUERY_CATEGORIES.DATABASE_MODIFICATION ||
     classification.category === QUERY_CATEGORIES.DDL
   ) {
-    return stageNaturalLanguageOperation(trimmedQuestion, userId, options);
+    return stageNaturalLanguageOperation(originalQuestion, userId, {
+      ...options,
+      normalizedRequest: languagePreview.language === 'english' ? null : languagePreview.normalized_request,
+    });
   }
 
   if (userId && options.connectionId) {
@@ -229,11 +251,14 @@ async function processNaturalLanguageQuery(question, userId = null, options = {}
   try {
     adapter = await getUserAdapter(userId);
   } catch (err) {
-    console.error('[ADAPTER] Error:', err.message);
+    console.error(`[ADAPTER] Error: ${safeErrorMessage(err)}`);
     return {
       success: false,
+      statusCode: err.statusCode || 400,
       type: 'query_error',
-      error: 'Database not connected. Please connect a database first.',
+      error: err.statusCode === 401
+        ? 'Authentication required.'
+        : 'Database not connected. Please connect a database first.',
     };
   }
 
@@ -243,7 +268,7 @@ async function processNaturalLanguageQuery(question, userId = null, options = {}
   // ── 3. Check User-Isolated Query Cache ─────────────
   const cached = getCachedQuery(userId, dbIdentifier, trimmedQuestion);
   if (cached) {
-    console.log(`[QUERY] Served from user query cache for [${userId || 'guest'}]`);
+    console.log(`[QUERY] Served from user query cache for [${userId}]`);
     return cached;
   }
 
@@ -267,6 +292,22 @@ async function processNaturalLanguageQuery(question, userId = null, options = {}
       type: 'query_error',
       error: 'No tables found in the connected database. Please verify your database has tables.',
     };
+  }
+
+  if (languagePreview.language !== 'english') {
+    const resolved = analyzeLanguage(originalQuestion, fullSchema);
+    if (resolved.status === 'clarification' || resolved.status === 'ambiguous') {
+      return {
+        success: false,
+        type: 'clarification_required',
+        message: resolved.message,
+        options: resolved.options || [],
+        language: resolved.language,
+        normalizedRequest: resolved.normalized_request,
+        sql: null,
+      };
+    }
+    trimmedQuestion = resolved.normalized_request;
   }
 
   // ── 5. Classify intent & Guardrails ─────────────────
@@ -331,8 +372,68 @@ async function processNaturalLanguageQuery(question, userId = null, options = {}
   }
 
   // ── 6. Select relevant schema tables ────────────────
-  const relevantSchema = getRelevantSchema(trimmedQuestion, fullSchema);
-  console.log(`[SCHEMA] Using ${Object.keys(relevantSchema.tables).length} of ${tableNames.length} tables`);
+  const retrieval = getRelevantSchema(trimmedQuestion, fullSchema);
+  console.log(`[SCHEMA] ${retrieval.status} confidence=${retrieval.confidence} tables=${(retrieval.matchedTables || []).join(', ') || '(none)'}`);
+
+  if (retrieval.status === 'NOT_FOUND') {
+    return {
+      success: false,
+      type: 'entity_not_found',
+      status: 'NOT_FOUND',
+      confidence: 0,
+      requestedEntities: retrieval.requestedEntities,
+      matchedTables: [],
+      message: retrieval.message,
+      error: retrieval.message,
+      sql: null,
+    };
+  }
+
+  if (retrieval.status === 'AMBIGUOUS') {
+    return {
+      success: false,
+      type: 'clarification_required',
+      status: 'AMBIGUOUS',
+      confidence: retrieval.confidence,
+      requestedEntities: retrieval.requestedEntities,
+      matchedTables: retrieval.matchedTables,
+      message: retrieval.message,
+      options: retrieval.options,
+      originalQuestion: trimmedQuestion,
+      sql: null,
+    };
+  }
+
+  if (retrieval.status === 'GENERAL_SCHEMA') {
+    const names = Object.keys(fullSchema.tables || {});
+    const relationshipCount = (fullSchema.relationships || []).length;
+    return {
+      success: true,
+      type: 'schema_overview',
+      status: 'GENERAL_SCHEMA',
+      confidence: 1,
+      matchedTables: names,
+      sql: null,
+      message: `Your connected database has ${names.length} tables: ${names.join(', ')}. ${relationshipCount} relationship${relationshipCount === 1 ? '' : 's'} were found.`,
+    };
+  }
+
+  if (!shouldGenerateSQL(retrieval)) {
+    return {
+      success: false,
+      type: 'entity_not_found',
+      status: retrieval.status,
+      confidence: retrieval.confidence || 0,
+      message: retrieval.message || 'I could not identify a table for that question.',
+      error: retrieval.message || 'I could not identify a table for that question.',
+      sql: null,
+    };
+  }
+
+  const relevantSchema = {
+    tables: retrieval.tables,
+    relationships: retrieval.relationships,
+  };
 
   // ── 7. Build Query Plan (Formal Non-Executing Planner)
   let queryPlan;
@@ -376,7 +477,7 @@ async function processNaturalLanguageQuery(question, userId = null, options = {}
     };
   }
 
-  console.log(`[QUERY] Generated (${dbType}): ${sql}`);
+  logSafeSql(`[QUERY] Generated (${dbType}):`, sql);
 
   // ── 9. 3-Layer Validation (Syntax, Schema, Security) ─
   const validation = validateQuery(sql, fullSchema, dbType);
@@ -459,7 +560,7 @@ async function processNaturalLanguageQuery(question, userId = null, options = {}
       lastError = err;
       attempts++;
 
-      console.log(`[DATABASE] Error (attempt ${attempts}): ${err.message}`);
+      console.log(`[DATABASE] Error (attempt ${attempts}): ${safeErrorMessage(err)}`);
 
       // Never retry on security rejections or timeouts
       if (
@@ -485,7 +586,7 @@ async function processNaturalLanguageQuery(question, userId = null, options = {}
           );
 
           if (correctedSQL && correctedSQL !== currentSQL) {
-            console.log(`[CORRECTION] Corrected SQL: ${correctedSQL}`);
+            logSafeSql('[CORRECTION] Corrected SQL:', correctedSQL);
 
             // Re-validate the corrected SQL through 3-layer validation
             const reValidation = validateQuery(correctedSQL, fullSchema, dbType);
@@ -510,7 +611,7 @@ async function processNaturalLanguageQuery(question, userId = null, options = {}
 
   // Handle Failure
   if (lastError) {
-    console.log(`[DATABASE] All attempts failed: ${lastError.message}`);
+    console.log(`[DATABASE] All attempts failed: ${safeErrorMessage(lastError)}`);
     logQuery({
       userId,
       databaseType: dbType,
@@ -562,7 +663,9 @@ async function processNaturalLanguageQuery(question, userId = null, options = {}
     success: true,
     type: 'query_result',
     category: QUERY_CATEGORIES.DATABASE_QUERY,
-    question: trimmedQuestion,
+    question: originalQuestion,
+    language: languagePreview.language,
+    normalizedRequest: trimmedQuestion,
     sql: currentSQL,
     dbType,
     explanation,
@@ -628,7 +731,22 @@ async function previewQuery(question, userId = null) {
   const adapter = await getUserAdapter(userId);
   const dbType = adapter.type || 'postgres';
   const fullSchema = await getDatabaseSchema(false, adapter, userId);
-  const relevantSchema = getRelevantSchema(question, fullSchema);
+  const retrieval = getRelevantSchema(question, fullSchema);
+  if (!shouldGenerateSQL(retrieval)) {
+    return {
+      success: false,
+      status: retrieval.status,
+      confidence: retrieval.confidence,
+      matchedTables: retrieval.matchedTables,
+      message: retrieval.message,
+      options: retrieval.options,
+      sql: null,
+    };
+  }
+  const relevantSchema = {
+    tables: retrieval.tables,
+    relationships: retrieval.relationships,
+  };
   const intentResult = classifyIntent(question, fullSchema);
 
   const plan = createQueryPlan(question, relevantSchema, dbType);

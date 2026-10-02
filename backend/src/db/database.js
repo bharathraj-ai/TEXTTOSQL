@@ -6,13 +6,14 @@
 
 require('dotenv').config();
 const { Pool } = require('pg');
+const { safeErrorMessage } = require('../utils/safeLog');
 
 function formatDbError(err) {
   if (!err) return 'Unknown error';
   if (err.errors && Array.isArray(err.errors)) {
-    return err.errors.map(e => e.message || e.code).join('; ') || err.message || err.code;
+    return safeErrorMessage(err.errors.map((e) => e.message || e.code).join('; ') || err.message || err.code);
   }
-  return err.message || err.code || String(err);
+  return safeErrorMessage(err.message || err.code || String(err));
 }
 
 const isNeon = Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.includes('neon.tech'));
